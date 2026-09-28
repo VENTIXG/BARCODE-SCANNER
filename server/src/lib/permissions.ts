@@ -2,7 +2,7 @@ export type Role = 'ADMIN' | 'MANAGER' | 'WAREHOUSE_USER';
 export const ROLES: Role[] = ['ADMIN', 'MANAGER', 'WAREHOUSE_USER'];
 
 /**
- * Role -> permission matrix. Keep in sync with client/src/lib/permissions.ts.
+ * Role -> permission matrix. The client receives the resolved list from /api/auth/me.
  */
 const ALL: Role[] = ['ADMIN', 'MANAGER', 'WAREHOUSE_USER'];
 const MGMT: Role[] = ['ADMIN', 'MANAGER'];

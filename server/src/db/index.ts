@@ -17,7 +17,7 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   default_unit: 'pcs',
 };
 
-export function openDatabase(file: string = config.dbFile): DB {
+export function openDatabase(file: string = config.dbFile, opts: { quiet?: boolean } = {}): DB {
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
@@ -25,7 +25,7 @@ export function openDatabase(file: string = config.dbFile): DB {
   db.pragma('synchronous = NORMAL');
   db.function('ims_norm', { deterministic: true }, (v: unknown) => (v == null ? null : normalizeText(String(v))));
   migrate(db);
-  ensureBaseData(db);
+  ensureBaseData(db, opts.quiet);
   return db;
 }
 
@@ -46,7 +46,7 @@ function migrate(db: DB) {
 }
 
 /** Default warehouse, default settings and a first admin account. */
-function ensureBaseData(db: DB) {
+function ensureBaseData(db: DB, quiet = false) {
   db.transaction(() => {
     const wh = db.prepare('SELECT id FROM warehouses WHERE is_default = 1').get();
     if (!wh) {
@@ -64,7 +64,7 @@ function ensureBaseData(db: DB) {
       db.prepare(
         `INSERT INTO users (username, full_name, password_hash, role) VALUES ('admin', 'Administrator', ?, 'ADMIN')`,
       ).run(bcrypt.hashSync(password, 10));
-      if (!process.env.VITEST)
+      if (!quiet && !process.env.VITEST)
         console.log(`[setup] Created initial admin user: admin / ${password} — change this password after first login.`);
     }
   })();

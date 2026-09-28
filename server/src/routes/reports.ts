@@ -99,7 +99,7 @@ reportsRouter.get('/valuation', (req, res) => {
         : { key: "COALESCE(c.name, '—')", join: 'LEFT JOIN categories c ON c.id = p.category_id' };
   const rows = db
     .prepare(
-      `SELECT ${expr.key} AS name, COUNT(p.id) AS products,
+      `SELECT ${expr.key} AS group_name, COUNT(p.id) AS products,
               COALESCE(SUM(MAX(COALESCE(i.quantity,0),0)), 0) AS units,
               COALESCE(SUM(MAX(COALESCE(i.quantity,0),0) * p.purchase_price), 0) AS costValue,
               COALESCE(SUM(MAX(COALESCE(i.quantity,0),0) * p.selling_price), 0) AS retailValue,
@@ -108,8 +108,8 @@ reportsRouter.get('/valuation', (req, res) => {
        LEFT JOIN inventory i ON i.product_id = p.id AND i.warehouse_id = ?
        ${expr.join}
        WHERE p.status = 'ACTIVE'
-       GROUP BY name ORDER BY costValue DESC`,
+       GROUP BY group_name ORDER BY costValue DESC`,
     )
-    .all(wh);
-  res.json({ data: rows });
+    .all(wh) as ({ group_name: string } & Record<string, unknown>)[];
+  res.json({ data: rows.map(({ group_name, ...r }) => ({ name: group_name, ...r })) });
 });

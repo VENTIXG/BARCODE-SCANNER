@@ -21,6 +21,12 @@ transactionsRouter.get('/', (req, res) => {
   res.json({ data: rows, total, page, pageSize });
 });
 
+/** Users for filter drop-downs (transactions / activity log). */
+transactionsRouter.get('/users', (req, res) => {
+  if (!can(req.user!.role, 'transactions.view') && !can(req.user!.role, 'audit.view')) throw forbidden();
+  res.json({ data: getDb().prepare('SELECT id, username, full_name FROM users ORDER BY username').all() });
+});
+
 /**
  * Reverse a transaction with an opposite adjustment. Managers can reverse any
  * transaction; other users only their own barcode scans from the last 30 minutes

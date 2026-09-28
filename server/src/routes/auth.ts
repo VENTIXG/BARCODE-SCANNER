@@ -10,6 +10,9 @@ import { PERMISSIONS, can, type Permission } from '../lib/permissions.js';
 
 export const authRouter = Router();
 
+/** Compared against when the user does not exist, so timing does not reveal valid usernames. */
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', 10);
+
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 20,
@@ -39,7 +42,7 @@ authRouter.post('/login', loginLimiter, (req, res) => {
     | (AuthUser & { password_hash: string })
     | undefined;
   // Always run bcrypt to keep response time constant for unknown users.
-  const ok = bcrypt.compareSync(password, user?.password_hash ?? '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinv');
+  const ok = bcrypt.compareSync(password, user?.password_hash ?? DUMMY_HASH);
   const meta = { id: 0, username, fullName: '', role: 'WAREHOUSE_USER' as const, ip: req.ip, userAgent: req.get('user-agent') };
   if (!user || !ok) {
     audit(db, user ? { ...meta, id: user.id } : null, {

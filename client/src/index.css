@@ -1,0 +1,127 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Semantic colour tokens — components use these instead of raw palette
+   colours so light and dark mode stay consistent. */
+:root {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #f8f9fb;
+  --surface-3: #eef0f4;
+  --line: #e3e6eb;
+  --line-strong: #cfd4dc;
+  --fg: #111827;
+  --fg-2: #4b5563;
+  --muted: #6b7280;
+  --brand: #1d4ed8;
+  --brand-hover: #1e40af;
+  --brand-soft: #e8eefc;
+  --brand-fg: #1d4ed8;
+  --ok: #047857;
+  --ok-soft: #e7f6ef;
+  --warn: #b45309;
+  --warn-soft: #fdf3e2;
+  --bad: #b91c1c;
+  --bad-soft: #fdecec;
+  /* chart tokens (validated palette, see dataviz reference) */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #898781;
+}
+
+.dark {
+  color-scheme: dark;
+  --bg: #0d0f13;
+  --surface: #16181d;
+  --surface-2: #1b1e24;
+  --surface-3: #23272f;
+  --line: #2a2e36;
+  --line-strong: #3a3f49;
+  --fg: #eef0f3;
+  --fg-2: #c3c7cf;
+  --muted: #8b919c;
+  --brand: #3b82f6;
+  --brand-hover: #60a5fa;
+  --brand-soft: #172a4d;
+  --brand-fg: #8fb6ff;
+  --ok: #34d399;
+  --ok-soft: #0f2e24;
+  --warn: #fbbf24;
+  --warn-soft: #33260c;
+  --bad: #f87171;
+  --bad-soft: #3a1717;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-grid: #2c2c2a;
+  --chart-axis: #898781;
+}
+
+@theme inline {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-fg: var(--fg);
+  --color-fg-2: var(--fg-2);
+  --color-muted: var(--muted);
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-fg: var(--brand-fg);
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-bad: var(--bad);
+  --color-bad-soft: var(--bad-soft);
+}
+
+/* Single-column grids must not grow wider than the screen on phones.
+   Responsive grid-cols-* utilities (utilities layer) override this. */
+@layer base {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Scanner feedback flashes */
+@keyframes flash-ok {
+  from { box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 55%, transparent); }
+  to { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes flash-bad {
+  from { box-shadow: 0 0 0 4px color-mix(in srgb, var(--bad) 55%, transparent); }
+  to { box-shadow: 0 0 0 0 transparent; }
+}
+.flash-ok { animation: flash-ok 0.9s ease-out; }
+.flash-bad { animation: flash-bad 0.9s ease-out; }
+
+@media print {
+  .no-print { display: none !important; }
+  body, #root { background: #fff !important; color: #000 !important; }
+  .print-plain { border: none !important; box-shadow: none !important; }
+}

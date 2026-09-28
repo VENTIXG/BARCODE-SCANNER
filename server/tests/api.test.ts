@@ -198,7 +198,7 @@ describe('excel import / export', () => {
     });
     expect(res.status).toBe(200);
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(res.body as Buffer);
+    await wb.xlsx.load(res.body as unknown as ArrayBuffer);
     const ws = wb.getWorksheet('Products')!;
     expect(ws.getRow(1).getCell(1).value).toBe('SKU');
     expect(ws.rowCount).toBeGreaterThan(5);

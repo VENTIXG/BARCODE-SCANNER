@@ -20,7 +20,7 @@ if (reset) {
   console.log('Database deleted.');
 }
 
-const db: DB = openDatabase();
+const db: DB = openDatabase(config.dbFile, { quiet: true });
 const existing = db.prepare('SELECT COUNT(*) FROM products').pluck().get() as number;
 if (existing > 0 && !reset) {
   console.log(`Database already has ${existing} products — skipping demo seed. Use "npm run seed -- --reset" to start over.`);
@@ -182,7 +182,7 @@ const catZone: Record<string, string> = { Beverages: 'A', Food: 'A', Cleaning: '
 interface P { id: number; sku: string; cost: number; price: number; min: number; velocity: number; supplier: string }
 const products: P[] = [];
 const counters: Record<string, number> = {};
-const DAYS = 180;
+const DAYS = 365;
 const dayMs = 86_400_000;
 const startDate = Date.now() - DAYS * dayMs;
 
