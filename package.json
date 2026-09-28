@@ -1,0 +1,24 @@
+{
+  "name": "warehouse-ims",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Inventory Management System with barcode scanning, Excel import/export and full audit trail",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,client -c blue,green \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w client && npm run build -w server",
+    "start": "npm run start -w server",
+    "seed": "npm run seed -w server",
+    "test": "npm run test -w server",
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
