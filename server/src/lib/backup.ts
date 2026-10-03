@@ -76,7 +76,9 @@ function prune(db: DB) {
 
 let running: Promise<BackupFile> | null = null;
 
-export function runBackup(label: 'auto' | 'manual' | 'before-restore' = 'auto', db: DB = getDb()): Promise<BackupFile> {
+export type BackupLabel = 'auto' | 'manual' | 'before-restore' | 'before-demo';
+
+export function runBackup(label: BackupLabel = 'auto', db: DB = getDb()): Promise<BackupFile> {
   // Never run two backups at the same time.
   if (running) return running;
   running = (async () => {

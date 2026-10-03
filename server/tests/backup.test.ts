@@ -28,6 +28,9 @@ describe('first run', () => {
     expect(res.status).toBe(201);
     expect(res.body.data.products).toBeGreaterThan(50);
     expect((await admin.post('/api/settings/demo-data')).status).toBe(409);
+    // An empty-database backup was taken first, so the demo data can be removed again.
+    const list = await admin.get('/api/backups');
+    expect(list.body.data.files.some((f: { name: string }) => f.name.endsWith('_before-demo.db'))).toBe(true);
     // The admin password was not overwritten by the demo users.
     expect((await request(app).post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
     expect((await request(app).post('/api/auth/login').send({ username: 'manager', password: 'manager123' })).status).toBe(200);
@@ -38,6 +41,7 @@ describe('backups', () => {
   let backupName = '';
 
   it('creates a backup and lists it', async () => {
+    getDb().prepare(`UPDATE settings SET value = '' WHERE key = 'last_backup_at'`).run();
     expect(backupDue()).toBe(true);
     const res = await admin.post('/api/backups');
     expect(res.status).toBe(201);

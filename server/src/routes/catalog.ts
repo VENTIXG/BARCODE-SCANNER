@@ -5,7 +5,7 @@ import { getDb, getDefaultWarehouseId, nowIso } from '../db/index.js';
 import { actorOf, requirePermission } from '../middleware/auth.js';
 import { audit, diff } from '../lib/audit.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
-import { checkWritableDir } from '../lib/backup.js';
+import { checkWritableDir, runBackup } from '../lib/backup.js';
 import { seedDemoData } from '../db/demoData.js';
 import { idParam, num, optText } from '../lib/http.js';
 import { normalizeLocationCode, parseLocationCode } from '../lib/locations.js';
@@ -228,10 +228,12 @@ locationsRouter.delete('/:id', requirePermission('catalog.manage'), (req, res) =
 export const settingsRouter = Router();
 
 /** Fill an empty database with demo data (products, suppliers, 12 months of movements). */
-settingsRouter.post('/demo-data', requirePermission('settings.manage'), (req, res) => {
+settingsRouter.post('/demo-data', requirePermission('settings.manage'), async (req, res) => {
   const db = getDb();
   const products = db.prepare('SELECT COUNT(*) FROM products').pluck().get() as number;
   if (products > 0) throw conflict('Demo data can only be loaded into an empty database');
+  // Restoring this backup later removes the demo data again.
+  await runBackup('before-demo', db);
   const stats = db.transaction(() => seedDemoData(db, { keepExistingUsers: true }))();
   audit(db, actorOf(req), {
     action: 'SETTINGS.DEMO_DATA',

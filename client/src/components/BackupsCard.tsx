@@ -162,7 +162,13 @@ export function BackupsCard() {
             </thead>
             <tbody>
               {data.files.map((f) => {
-                const kind = f.name.includes('_manual') ? t('Manual') : f.name.includes('_before-restore') ? t('Before restore') : t('Automatic');
+                const kind = f.name.includes('_manual')
+                  ? t('Manual')
+                  : f.name.includes('_before-restore')
+                    ? t('Before restore')
+                    : f.name.includes('_before-demo')
+                      ? t('Before demo data (empty)')
+                      : t('Automatic');
                 return (
                   <tr key={f.name}>
                     <Td className="tabular whitespace-nowrap">{fmtDateTime(f.createdAt)}</Td>
