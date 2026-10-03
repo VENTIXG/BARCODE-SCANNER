@@ -19,6 +19,7 @@ import { searchRouter } from './routes/search.js';
 import { stockRouter } from './routes/stock.js';
 import { transactionsRouter } from './routes/transactions.js';
 import { usersRouter } from './routes/users.js';
+import { backupsRouter } from './routes/backups.js';
 
 export function createApp() {
   const app = express();
@@ -69,6 +70,7 @@ export function createApp() {
   api.use('/reports', requirePermission('reports.view'), reportsRouter);
   api.use('/audit', requirePermission('audit.view'), auditRouter);
   api.use('/users', requirePermission('users.manage'), usersRouter);
+  api.use('/backups', requirePermission('settings.manage'), backupsRouter);
   api.use(notFoundHandler);
 
   app.use('/api', api);

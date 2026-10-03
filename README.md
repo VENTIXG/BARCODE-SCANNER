@@ -10,7 +10,7 @@ Excel import/export and a full, immutable audit trail of every stock movement.
 
 ---
 
-## Quick start
+## Quick start (development)
 
 ```bash
 npm install          # installs server + client (npm workspaces)
@@ -32,7 +32,41 @@ Without the seed, an empty database is created on first start with a single
 
 `npm run seed -- --reset` deletes the database and recreates the demo data.
 
-### Production
+## Windows desktop app (recommended for a single PC)
+
+The app also ships as a normal Windows program: an installer (`Warehouse-IMS-Setup-<version>.exe`),
+a desktop shortcut, its own window, no Node.js and no browser needed.
+
+**Install:** run `Warehouse-IMS-Setup-<version>.exe`. The installer is not code-signed yet, so Windows
+SmartScreen may say *"Windows protected your PC"*: click **More info → Run anyway**.
+First sign-in: `admin` / `admin123`; you are asked to change the password, and an empty
+database offers **Load demo data** or **Excel import**.
+
+**Where things are**
+
+| What | Where |
+|---|---|
+| Program | `%LOCALAPPDATA%\Programs\Warehouse IMS` (or the folder chosen during setup) |
+| Database, photos | `%APPDATA%\Warehouse IMS\data` (*File → Open data folder*) |
+| Backups | `%APPDATA%\Warehouse IMS\data\backups`, or the folder set in *Settings → Backups* |
+| Log file | `%APPDATA%\Warehouse IMS\logs\main.log` (*File → Open log file*) |
+
+Uninstalling or installing a newer version keeps the data folder.
+
+**Backups:** a full copy of the database is taken automatically once a day (also when the app is
+closed and a backup is due), the last 30 are kept. *Settings → Backups* has *Back up now*, a folder
+picker (choose a USB stick, second disk or OneDrive folder), download and **restore** — restoring
+first saves the current data, so it can be undone.
+
+**Build the installer yourself**
+
+- Automatically: every push runs the *Windows installer* GitHub Actions workflow on a Windows
+  machine; download the `.exe` from the run's *Artifacts*.
+- On a Windows PC: `npm install` then `npm run desktop:win` → `desktop/release/`.
+- On Linux/macOS the same command works without Wine (see `desktop/scripts/build-win.cjs`).
+- Try the desktop app without building an installer: `npm run desktop`.
+
+## Server mode (production on a server or several PCs)
 
 ```bash
 npm install
@@ -45,7 +79,7 @@ Data lives in `DATA_DIR` (default `server/data/`): `inventory.db` (SQLite) and
 `uploads/` (product photos). Back up that folder — e.g. with
 `sqlite3 inventory.db ".backup backup.db"` while the app is running.
 
-### Tests
+## Tests
 
 ```bash
 npm test             # API integration tests (vitest + supertest, throw-away database)
@@ -156,4 +190,5 @@ UI work only (every stock row and transaction already carries `warehouse_id`).
 `GET /api/transactions` · `POST /api/transactions/:id/reverse` ·
 `POST /api/import/products/validate` · `POST /api/import/products/commit` · `GET /api/import/template` ·
 `GET /api/export/{products|inventory|low-stock|transactions|documents/:kind|grouped/:by}` ·
-`GET /api/dashboard` · `GET /api/reports/{movements|valuation}` · `GET /api/search?q=` · `GET /api/audit`
+`GET /api/dashboard` · `GET /api/reports/{movements|valuation}` · `GET /api/search?q=` · `GET /api/audit` ·
+`GET|POST /api/backups` · `POST /api/backups/:file/restore` · `POST /api/backups/restore-upload` · `POST /api/settings/demo-data`

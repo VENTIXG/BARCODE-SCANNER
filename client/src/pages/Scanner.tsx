@@ -228,12 +228,12 @@ export default function Scanner() {
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
         <div className="space-y-4">
           <Card className={clsx('border-t-4 p-4', modeColor)}>
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+            <div className="flex flex-wrap items-center gap-3">
               <Segmented<Mode>
                 size="lg"
                 value={mode}
                 onChange={(m) => (setMode(m), setPending(null))}
-                className="flex w-full lg:w-auto"
+                className="flex w-full sm:w-auto"
                 options={[
                   { value: 'IN', label: <><ArrowDownToLine className="size-4.5" /> STOCK IN</>, activeClass: 'bg-emerald-600 text-white shadow-sm' },
                   { value: 'OUT', label: <><ArrowUpFromLine className="size-4.5" /> STOCK OUT</>, activeClass: 'bg-orange-600 text-white shadow-sm' },

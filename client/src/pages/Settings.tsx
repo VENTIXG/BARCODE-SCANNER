@@ -8,6 +8,7 @@ import { useI18n } from '../lib/i18n';
 import { errMsg } from '../lib/queries';
 import { beep, setSoundEnabled, soundEnabled } from '../lib/scanner';
 import { useTheme } from '../lib/theme';
+import { BackupsCard } from '../components/BackupsCard';
 import { Button, Card, CardHeader, Checkbox, ErrorBox, Field, Input, PageHeader, Segmented } from '../components/ui';
 
 interface Warehouse {
@@ -144,6 +145,7 @@ export default function Settings() {
               </form>
             </Card>
           )}
+          <BackupsCard />
           {settings.error && <ErrorBox error={errMsg(settings.error)} />}
         </>
       )}

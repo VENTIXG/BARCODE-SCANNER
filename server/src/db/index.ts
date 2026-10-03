@@ -15,6 +15,10 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   currency: 'EUR',
   allow_negative_stock: 'false',
   default_unit: 'pcs',
+  backup_enabled: 'true',
+  backup_dir: '',
+  backup_keep: '30',
+  last_backup_at: '',
 };
 
 export function openDatabase(file: string = config.dbFile, opts: { quiet?: boolean } = {}): DB {
@@ -61,9 +65,10 @@ function ensureBaseData(db: DB, quiet = false) {
     const users = db.prepare('SELECT COUNT(*) FROM users').pluck().get() as number;
     if (users === 0) {
       const password = process.env.ADMIN_PASSWORD ?? 'admin123';
+      // A first admin with the well-known default password must change it after signing in.
       db.prepare(
-        `INSERT INTO users (username, full_name, password_hash, role) VALUES ('admin', 'Administrator', ?, 'ADMIN')`,
-      ).run(bcrypt.hashSync(password, 10));
+        `INSERT INTO users (username, full_name, password_hash, role, must_change_password) VALUES ('admin', 'Administrator', ?, 'ADMIN', ?)`,
+      ).run(bcrypt.hashSync(password, 10), password === 'admin123' ? 1 : 0);
       if (!quiet && !process.env.VITEST)
         console.log(`[setup] Created initial admin user: admin / ${password} — change this password after first login.`);
     }
@@ -80,6 +85,12 @@ export function getDb(): DB {
 /** For tests: swap the active database. */
 export function setDb(db: DB) {
   instance = db;
+}
+
+/** Close the active connection; the next getDb() reopens the database file. */
+export function closeDb() {
+  if (instance?.open) instance.close();
+  instance = null;
 }
 
 export function getDefaultWarehouseId(db: DB = getDb()): number {

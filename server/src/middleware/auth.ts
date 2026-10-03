@@ -16,6 +16,7 @@ export interface AuthUser {
   role: Role;
   is_active: number;
   token_version: number;
+  must_change_password: number;
 }
 
 declare global {
@@ -62,7 +63,7 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   }
   const user = getDb()
     .prepare(
-      'SELECT id, username, full_name, email, role, is_active, token_version FROM users WHERE id = ?',
+      'SELECT id, username, full_name, email, role, is_active, token_version, must_change_password FROM users WHERE id = ?',
     )
     .get(payload.sub) as AuthUser | undefined;
   if (!user || !user.is_active || user.token_version !== payload.tv)

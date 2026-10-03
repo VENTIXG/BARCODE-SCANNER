@@ -1,0 +1,45 @@
+name: Windows installer
+
+# Builds Warehouse-IMS-Setup-<version>.exe on a real Windows machine.
+# Download it from the run's "Artifacts" section.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master, 'claude/**']
+    paths-ignore: ['**.md']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Install desktop tooling
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build installer
+        working-directory: desktop
+        run: npm run dist:win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Warehouse-IMS-Setup
+          path: desktop/release/*.exe
+          retention-days: 30
+          if-no-files-found: error

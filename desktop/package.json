@@ -1,0 +1,66 @@
+{
+  "name": "warehouse-ims-desktop",
+  "private": true,
+  "description": "Windows desktop build of Warehouse IMS (Electron + installer)",
+  "scripts": {
+    "stage": "npm run build --prefix .. && node scripts/stage.mjs",
+    "start": "npm run stage && electron app",
+    "dist:win": "npm run stage && node scripts/build-win.cjs",
+    "dist:dir": "npm run stage && electron-builder --dir"
+  },
+  "build": {
+    "appId": "gr.warehouseims.app",
+    "productName": "Warehouse IMS",
+    "copyright": "Warehouse IMS",
+    "directories": {
+      "app": "app",
+      "output": "release",
+      "buildResources": "build"
+    },
+    "npmRebuild": false,
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Warehouse-IMS-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Warehouse IMS",
+      "installerLanguages": [
+        "el_GR",
+        "en_US"
+      ],
+      "language": "1032",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true,
+      "warningsAsErrors": false
+    },
+    "linux": {
+      "target": [
+        "dir"
+      ],
+      "icon": "build/icon.png",
+      "category": "Office"
+    },
+    "publish": null
+  },
+  "devDependencies": {
+    "electron": "^44.5.1",
+    "electron-builder": "^26.15.3"
+  }
+}

@@ -29,6 +29,7 @@ export function publicUser(u: AuthUser) {
     fullName: u.full_name,
     email: u.email,
     role: u.role,
+    mustChangePassword: Boolean(u.must_change_password),
     permissions: (Object.keys(PERMISSIONS) as Permission[]).filter((p) => can(u.role, p)),
   };
 }
@@ -89,7 +90,8 @@ authRouter.post('/change-password', requireAuth, (req, res) => {
   const db = getDb();
   const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(req.user!.id) as { password_hash: string };
   if (!bcrypt.compareSync(body.currentPassword, row.password_hash)) throw badRequest('Current password is incorrect');
-  db.prepare('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?').run(
+  if (body.newPassword === body.currentPassword) throw badRequest('The new password must be different from the current one');
+  db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0, token_version = token_version + 1, updated_at = ? WHERE id = ?').run(
     bcrypt.hashSync(body.newPassword, 10),
     nowIso(),
     req.user!.id,

@@ -9,7 +9,7 @@ import { Button, Card, CardHeader, ErrorBox, Field, Input, PageHeader } from '..
 
 export default function Profile() {
   const t = useT();
-  const { user } = useAuth();
+  const { user, refresh } = useAuth();
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -20,6 +20,7 @@ export default function Profile() {
       setCurrent('');
       setNext('');
       setConfirm('');
+      void refresh();
     },
   });
   const mismatch = confirm.length > 0 && next !== confirm;

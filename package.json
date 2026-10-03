@@ -13,7 +13,9 @@
     "start": "npm run start -w server",
     "seed": "npm run seed -w server",
     "test": "npm run test -w server",
-    "typecheck": "npm run typecheck -w server && npm run typecheck -w client"
+    "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
+    "desktop": "npm ci --prefix desktop && npm run start --prefix desktop",
+    "desktop:win": "npm ci --prefix desktop && npm run dist:win --prefix desktop"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

@@ -35,7 +35,7 @@ usersRouter.post('/', (req, res) => {
   if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(body.username)) throw conflict('Username already exists');
   const id = Number(
     db
-      .prepare('INSERT INTO users (username, full_name, email, password_hash, role, is_active) VALUES (?, ?, ?, ?, ?, ?)')
+      .prepare('INSERT INTO users (username, full_name, email, password_hash, role, is_active, must_change_password) VALUES (?, ?, ?, ?, ?, ?, 1)')
       .run(body.username, body.fullName, body.email ?? null, bcrypt.hashSync(body.password, 10), body.role, body.isActive ? 1 : 0)
       .lastInsertRowid,
   );
@@ -77,7 +77,9 @@ usersRouter.put('/:id', (req, res) => {
     `UPDATE users SET username = ?, full_name = ?, email = ?, role = ?, is_active = ?, updated_at = ?,
        token_version = token_version + ? WHERE id = ?`,
   ).run(after.username, after.full_name, after.email, after.role, after.is_active, nowIso(), bump ? 1 : 0, id);
-  if (body.password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(body.password, 10), id);
+  // A password set by an administrator for someone else is temporary: that user changes it at next sign-in.
+  if (body.password)
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = ? WHERE id = ?').run(bcrypt.hashSync(body.password, 10), id === req.user!.id ? 0 : 1, id);
   if (d.changed || body.password) {
     audit(db, actorOf(req), {
       action: 'USER.UPDATE',

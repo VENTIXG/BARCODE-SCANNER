@@ -4,7 +4,9 @@ import { z } from 'zod';
 import { getDb, getDefaultWarehouseId, nowIso } from '../db/index.js';
 import { actorOf, requirePermission } from '../middleware/auth.js';
 import { audit, diff } from '../lib/audit.js';
-import { conflict, notFound } from '../lib/errors.js';
+import { badRequest, conflict, notFound } from '../lib/errors.js';
+import { checkWritableDir } from '../lib/backup.js';
+import { seedDemoData } from '../db/demoData.js';
 import { idParam, num, optText } from '../lib/http.js';
 import { normalizeLocationCode, parseLocationCode } from '../lib/locations.js';
 
@@ -225,6 +227,20 @@ locationsRouter.delete('/:id', requirePermission('catalog.manage'), (req, res) =
 
 export const settingsRouter = Router();
 
+/** Fill an empty database with demo data (products, suppliers, 12 months of movements). */
+settingsRouter.post('/demo-data', requirePermission('settings.manage'), (req, res) => {
+  const db = getDb();
+  const products = db.prepare('SELECT COUNT(*) FROM products').pluck().get() as number;
+  if (products > 0) throw conflict('Demo data can only be loaded into an empty database');
+  const stats = db.transaction(() => seedDemoData(db, { keepExistingUsers: true }))();
+  audit(db, actorOf(req), {
+    action: 'SETTINGS.DEMO_DATA',
+    entityType: 'setting',
+    description: `${req.user!.username} loaded demo data: ${stats.products} products, ${stats.transactions} transactions.`,
+  });
+  res.status(201).json({ data: stats });
+});
+
 settingsRouter.get('/', (_req, res) => {
   const rows = getDb().prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[];
   res.json({ data: Object.fromEntries(rows.map((r) => [r.key, r.value])) });
@@ -238,8 +254,16 @@ settingsRouter.put('/', requirePermission('settings.manage'), (req, res) => {
       currency: z.string().trim().length(3).toUpperCase().optional(),
       allow_negative_stock: z.enum(['true', 'false']).optional(),
       default_unit: z.string().trim().min(1).max(20).optional(),
+      backup_enabled: z.enum(['true', 'false']).optional(),
+      backup_keep: z.coerce.number().int().min(1).max(365).transform(String).optional(),
+      /** Empty string = default folder inside the data directory. */
+      backup_dir: z.string().trim().max(500).optional(),
     })
     .parse(req.body);
+  if (body.backup_dir) {
+    const problem = checkWritableDir(body.backup_dir);
+    if (problem) throw badRequest(problem, 'BACKUP_DIR');
+  }
   db.transaction(() => {
     for (const [key, value] of Object.entries(body)) {
       if (value === undefined) continue;

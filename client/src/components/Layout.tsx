@@ -321,6 +321,7 @@ export function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const override = useScanOverride();
+  const { user } = useAuth();
 
   // A scan made while no field has focus: pages may take it over (scanner,
   // stock in/out); otherwise open the product.
@@ -363,6 +364,15 @@ export function Layout() {
           </div>
         </header>
         <main className="mx-auto max-w-[1600px] px-4 py-5 sm:px-6 sm:py-6">
+          {user?.mustChangePassword && location.pathname !== '/profile' && (
+            <div className="no-print mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-warn/30 bg-warn-soft px-4 py-2.5 text-sm text-warn">
+              <KeyRound className="size-4 shrink-0" />
+              <span className="flex-1">{t('You are using a temporary or default password. Change it now so nobody else can sign in as you.')}</span>
+              <button onClick={() => navigate('/profile')} className="rounded-md bg-surface px-3 py-1 font-semibold text-fg shadow-xs hover:bg-surface-3">
+                {t('Change password')}
+              </button>
+            </div>
+          )}
           <Outlet />
         </main>
       </div>

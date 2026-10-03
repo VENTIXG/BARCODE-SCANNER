@@ -10,3 +10,6 @@ server/data/
 coverage/
 .DS_Store
 *.log
+desktop/app/
+desktop/release/
+desktop/node_modules/

@@ -16,6 +16,7 @@ export interface User {
   fullName: string;
   email: string | null;
   role: Role;
+  mustChangePassword: boolean;
   permissions: string[];
 }
 

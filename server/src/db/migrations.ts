@@ -259,4 +259,11 @@ export const migrations: { version: number; name: string; sql: string }[] = [
     );
     `,
   },
+  {
+    version: 2,
+    name: 'users_must_change_password',
+    sql: /* sql */ `
+    ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1));
+    `,
+  },
 ];

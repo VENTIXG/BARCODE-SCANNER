@@ -1,7 +1,8 @@
-import { Link } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { Link, useNavigate } from 'react-router-dom';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { AlertTriangle, ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, Boxes, Euro, Package, PackageX } from 'lucide-react';
+import { AlertTriangle, Database, FileSpreadsheet, Plus, ArrowDownToLine, ArrowLeftRight, ArrowUpFromLine, Boxes, Euro, Package, PackageX } from 'lucide-react';
 import clsx from 'clsx';
 import { api, tz } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -9,7 +10,7 @@ import { fmtDateTime, fmtDayShort, fmtMoney, fmtMonth, fmtNumber, fmtQty, fmtRel
 import { useT } from '../lib/i18n';
 import type { Product, Transaction } from '../lib/types';
 import { ChartCard, LegendItem, TooltipBox, axisProps, useChartColors } from '../components/charts';
-import { Card, CardHeader, EmptyState, LoadingBlock, PageHeader, ProductThumb, QtyChange, StockBadge, TxTypeBadge } from '../components/ui';
+import { Button, Card, CardHeader, EmptyState, LoadingBlock, PageHeader, ProductThumb, QtyChange, StockBadge, TxTypeBadge } from '../components/ui';
 
 interface DashboardData {
   totals: { totalProducts: number; activeProducts: number; totalUnits: number; inventoryValue: number; retailValue: number; lowStock: number; outOfStock: number };
@@ -37,6 +38,65 @@ function Kpi({ label, value, sub, icon, tone = 'neutral', to }: { label: string;
   return to ? <Link to={to}>{body}</Link> : body;
 }
 
+/** Shown instead of the dashboard while the database has no products. */
+function Welcome() {
+  const t = useT();
+  const { can, user, refresh } = useAuth();
+  const navigate = useNavigate();
+  const qc = useQueryClient();
+  const demo = useMutation({
+    mutationFn: () => api.post<{ data: { products: number } }>('/settings/demo-data'),
+    onSuccess: (r) => {
+      toast.success(t('Demo data loaded: {n} products', { n: r.data.products }));
+      void refresh(); // company name changes too
+      void qc.invalidateQueries();
+    },
+    onError: (e) => toast.error((e as Error).message),
+  });
+  const steps = [
+    can('settings.manage') && {
+      icon: <Database className="size-5" />,
+      title: t('Try it with demo data'),
+      text: t('78 sample products, suppliers and 12 months of stock movements, to learn the app before entering real data.'),
+      action: (
+        <Button variant="primary" loading={demo.isPending} onClick={() => demo.mutate()}>
+          {t('Load demo data')}
+        </Button>
+      ),
+    },
+    can('import.run') && {
+      icon: <FileSpreadsheet className="size-5" />,
+      title: t('Import your products from Excel'),
+      text: t('Download the template, fill in SKU, barcode, name, quantity and the other columns, then upload it.'),
+      action: <Button onClick={() => navigate('/import-export')}>{t('Open Excel import')}</Button>,
+    },
+    can('products.manage') && {
+      icon: <Plus className="size-5" />,
+      title: t('Add products one by one'),
+      text: t('Scan the barcode into the form and enter the opening quantity.'),
+      action: <Button onClick={() => navigate('/products/new')}>{t('New product')}</Button>,
+    },
+  ].filter(Boolean) as { icon: React.ReactNode; title: string; text: string; action: React.ReactNode }[];
+  return (
+    <div className="mx-auto max-w-3xl">
+      <PageHeader title={t('Welcome to Warehouse IMS')} subtitle={t('Hello {name}. The warehouse is empty — choose how to start.', { name: user?.fullName ?? '' })} />
+      <div className="grid gap-3">
+        {steps.map((s) => (
+          <Card key={s.title} className="flex flex-wrap items-center gap-4 p-5">
+            <div className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand-fg">{s.icon}</div>
+            <div className="min-w-0 flex-1">
+              <div className="font-semibold">{s.title}</div>
+              <div className="text-sm text-muted">{s.text}</div>
+            </div>
+            {s.action}
+          </Card>
+        ))}
+        {!steps.length && <EmptyState title={t('No products yet')} description={t('Ask a manager to add products or import them from Excel.')} />}
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const t = useT();
   const { user, can } = useAuth();
@@ -48,6 +108,7 @@ export default function Dashboard() {
   });
   if (isLoading || !data) return <LoadingBlock />;
   const { totals, today } = data;
+  if (totals.totalProducts === 0) return <Welcome />;
   const hour = new Date().getHours();
   const greeting = hour < 12 ? t('Good morning') : hour < 18 ? t('Good afternoon') : t('Good evening');
 
