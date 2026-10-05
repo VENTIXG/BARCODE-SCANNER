@@ -1,12 +1,18 @@
 name: Windows installer
 
 # Builds Warehouse-IMS-Setup-<version>.exe on a real Windows machine.
-# Download it from the run's "Artifacts" section.
+# - Every push: download it from the run's "Artifacts" (kept 30 days).
+# - Pushing a tag like v1.0.1: also publishes a GitHub Release with a permanent
+#   link: https://github.com/<owner>/<repo>/releases/latest/download/Warehouse-IMS-Setup.exe
 on:
   workflow_dispatch:
   push:
     branches: [main, master, 'claude/**']
+    tags: ['v*']
     paths-ignore: ['**.md']
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -43,3 +49,22 @@ jobs:
           path: desktop/release/*.exe
           retention-days: 30
           if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $exe = Get-ChildItem desktop/release/*.exe | Select-Object -First 1
+          # Fixed file name so the "latest" download link never changes.
+          Copy-Item $exe.FullName desktop/release/Warehouse-IMS-Setup.exe
+          $notes = @"
+          Warehouse IMS $env:TAG for Windows.
+
+          Download **Warehouse-IMS-Setup.exe**, double-click and install.
+          Windows may show "Windows protected your PC" because the installer is not code-signed: click **More info → Run anyway**.
+          First sign-in: admin / admin123 (you will be asked to change it). Your data stays on your PC in %APPDATA%\Warehouse IMS.
+          "@
+          gh release create $env:TAG desktop/release/Warehouse-IMS-Setup.exe --title "Warehouse IMS $env:TAG" --notes $notes --latest
