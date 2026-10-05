@@ -51,20 +51,28 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # Default branch or a v* tag: create (or refresh) the GitHub Release for the
+        # version in package.json. The asset keeps a fixed name so this link never changes:
+        # https://github.com/<owner>/<repo>/releases/latest/download/Warehouse-IMS-Setup.exe
+        if: github.ref_name == github.event.repository.default_branch || startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
         run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tag = "v$version"
           $exe = Get-ChildItem desktop/release/*.exe | Select-Object -First 1
-          # Fixed file name so the "latest" download link never changes.
           Copy-Item $exe.FullName desktop/release/Warehouse-IMS-Setup.exe
           $notes = @"
-          Warehouse IMS $env:TAG for Windows.
+          Warehouse IMS $version for Windows.
 
           Download **Warehouse-IMS-Setup.exe**, double-click and install.
           Windows may show "Windows protected your PC" because the installer is not code-signed: click **More info → Run anyway**.
           First sign-in: admin / admin123 (you will be asked to change it). Your data stays on your PC in %APPDATA%\Warehouse IMS.
           "@
-          gh release create $env:TAG desktop/release/Warehouse-IMS-Setup.exe --title "Warehouse IMS $env:TAG" --notes $notes --latest
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag desktop/release/Warehouse-IMS-Setup.exe --clobber
+          } else {
+            gh release create $tag desktop/release/Warehouse-IMS-Setup.exe --target $env:GITHUB_SHA --title "Warehouse IMS $version" --notes $notes --latest
+          }
