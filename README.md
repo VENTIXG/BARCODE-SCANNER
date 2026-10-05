@@ -37,7 +37,10 @@ Without the seed, an empty database is created on first start with a single
 The app also ships as a normal Windows program: an installer (`Warehouse-IMS-Setup-<version>.exe`),
 a desktop shortcut, its own window, no Node.js and no browser needed.
 
-**Install:** run `Warehouse-IMS-Setup-<version>.exe`. The installer is not code-signed yet, so Windows
+**Download:** https://github.com/VENTIXG/BARCODE-SCANNER/releases/latest/download/Warehouse-IMS-Setup.exe
+(permanent link to the latest version, no GitHub account needed).
+
+**Install:** run `Warehouse-IMS-Setup.exe`. The installer is not code-signed yet, so Windows
 SmartScreen may say *"Windows protected your PC"*: click **More info → Run anyway**.
 First sign-in: `admin` / `admin123`; you are asked to change the password, and an empty
 database offers **Load demo data** or **Excel import**.
@@ -61,7 +64,9 @@ first saves the current data, so it can be undone.
 **Build the installer yourself**
 
 - Automatically: every push runs the *Windows installer* GitHub Actions workflow on a Windows
-  machine; download the `.exe` from the run's *Artifacts*.
+  machine. On the default branch it also creates/refreshes the GitHub Release `v<version>`
+  (version from `package.json`; bump it to publish a new release). Other branches: download the
+  `.exe` from the run's *Artifacts*.
 - On a Windows PC: `npm install` then `npm run desktop:win` → `desktop/release/`.
 - On Linux/macOS the same command works without Wine (see `desktop/scripts/build-win.cjs`).
 - Try the desktop app without building an installer: `npm run desktop`.
