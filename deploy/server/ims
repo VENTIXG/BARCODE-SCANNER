@@ -313,6 +313,8 @@ cleanup_old() {
   prev="$(env_get IMS_PREVIOUS_VERSION)"
   while read -r img; do
     v="${img#warehouse-ims:}"
+    # Only release images (x.y.z); never other local tags such as warehouse-ims:dev.
+    valid_version "$v" || continue
     [[ "$v" == "$cur" || "$v" == "$prev" ]] || docker rmi "$img" >/dev/null 2>&1 || true
   done < <(docker images --format '{{.Repository}}:{{.Tag}}' 'warehouse-ims' 2>/dev/null)
   for v in "$DOWNLOAD_DIR"/*; do
@@ -562,6 +564,14 @@ ask() { # PROMPT [default] -> REPLY
   REPLY="${REPLY:-$d}"
 }
 
+ask_secret() { # PROMPT -> REPLY (not shown while typing)
+  REPLY=""
+  if has_tty; then
+    read -r -s -p "$1: " REPLY </dev/tty || true
+    printf '\n' >/dev/tty
+  fi
+}
+
 cmd_offsite() {
   need_root offsite
   has_tty || die "Η ρύθμιση γίνεται με ερωτήσεις: τρέξτε την από τερματικό (SSH)."
@@ -586,11 +596,14 @@ cmd_offsite() {
   fi
   ask "Access key ID" "$(env_get S3_ACCESS_KEY_ID)"
   local key="$REPLY"
-  ask "Secret access key (δεν εμφανίζεται ξανά)" ""
+  local S3_SECRET_HINT=""
+  [[ -n "$(env_get S3_SECRET_ACCESS_KEY)" ]] && S3_SECRET_HINT="· κενό = το ίδιο με πριν"
+  ask_secret "Secret access key (δεν φαίνεται όσο γράφετε${S3_SECRET_HINT:-})"
   local secret="${REPLY:-$(env_get S3_SECRET_ACCESS_KEY)}"
   ask "Φάκελος μέσα στο bucket" "$(env_get S3_PREFIX warehouse-ims/)"
   local prefix="$REPLY"
-  ask "Κρυπτογράφηση με κωδικό; Αν τον χάσετε, τα αντίγραφα δεν ανοίγουν. Κωδικός (κενό = χωρίς)" ""
+  say "Κρυπτογράφηση: τα αντίγραφα κλειδώνονται με κωδικό πριν φύγουν από τον server. Αν χαθεί ο κωδικός, δεν ανοίγουν."
+  ask_secret "Κωδικός κρυπτογράφησης (κενό = χωρίς κρυπτογράφηση)"
   local pass="${REPLY:-$(env_get BACKUP_PASSPHRASE)}"
   env_set S3_ENDPOINT "$endpoint"
   env_set S3_REGION "$region"
@@ -602,7 +615,8 @@ cmd_offsite() {
   dc up -d app >/dev/null
   wait_healthy "$(env_get IMS_VERSION)" || die "Η εφαρμογή δεν ξεκίνησε: sudo ims logs"
   if app_cli offsite-test; then
-    app_cli offsite-sync || true
+    # A fresh backup, uploaded now, so the bucket has a copy from day one.
+    app_cli backup manual >/dev/null && app_cli offsite-sync || true
     say "Έτοιμο: κάθε backup ανεβαίνει πλέον και στο cloud."
     [[ -n "$pass" ]] && say "Φυλάξτε τον κωδικό κρυπτογράφησης κάπου ασφαλές, εκτός server."
   else
