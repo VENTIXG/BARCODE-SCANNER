@@ -57,11 +57,11 @@ curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/i
 και έναν **κωδικό**. Σημειώστε τον, γιατί δεν εμφανίζεται ξανά.
 
 **Τρόπος Β, χωρίς SSH:** όταν φτιάχνετε τον server, οι περισσότεροι πάροχοι έχουν πεδίο **«User data» / «Cloud-init»**.
-Επικολλήστε εκεί το παρακάτω, με το δικό σας domain και κωδικό (τουλάχιστον 12 χαρακτήρες):
+Επικολλήστε εκεί το παρακάτω, με το δικό σας domain και κωδικό (τουλάχιστον 12 χαρακτήρες, λατινικοί, χωρίς το σύμβολο `'`):
 
 ```bash
 #!/bin/bash
-curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/install.sh | DOMAIN=apothiki.etaireia.gr ADMIN_PASSWORD='Ένας-μεγάλος-κωδικός-2026' bash -s -- --yes
+curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/install.sh | DOMAIN=apothiki.etaireia.gr ADMIN_PASSWORD='Apothiki-Kodikos-2026' bash -s -- --yes
 ```
 
 Ο server εγκαθιστά τα πάντα μόνος του σε περίπου 5 λεπτά. Μετά φτιάξτε την εγγραφή DNS του βήματος 2 με την IP που
@@ -69,7 +69,7 @@ curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/i
 
 Τι κάνει ο εγκαταστάτης: Docker, την εφαρμογή, HTTPS (Caddy + Let's Encrypt), daily backup, νυχτερινές ενημερώσεις
 (03:30), έλεγχο λειτουργίας ανά 5 λεπτά, ενημερώσεις ασφαλείας Ubuntu (με επανεκκίνηση στις 04:30 μόνο όταν χρειάζεται),
-ώρα Ελλάδας στον server (για άλλη ζώνη: `TZ=Europe/Nicosia` πριν από το `bash`), swap σε μικρούς servers και άνοιγμα των
+ώρα Ελλάδας στον server (για άλλη ζώνη: `… | sudo TZ=Europe/Nicosia bash`), swap σε μικρούς servers και άνοιγμα των
 θυρών 80/443 αν το `ufw` είναι ενεργό.
 
 ## Βήμα 4: Πρώτη σύνδεση

@@ -351,6 +351,8 @@ function initUpdater() {
   updater.autoInstallOnAppQuit = true;
   // One fixed file name on GitHub ("latest" link): download the whole installer every time.
   updater.disableDifferentialDownload = true;
+  // A full installer, not a web installer (electron-updater asks for this to be explicit).
+  updater.disableWebInstaller = true;
   if (process.env.IMS_UPDATE_URL) updater.setFeedURL({ provider: 'generic', url: process.env.IMS_UPDATE_URL });
   updater.on('checking-for-update', () => setUpdateState({ state: 'checking', message: undefined }));
   updater.on('update-not-available', () => setUpdateState({ state: 'up-to-date', checkedAt: new Date().toISOString(), message: undefined }));
