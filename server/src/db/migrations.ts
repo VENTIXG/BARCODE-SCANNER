@@ -301,3 +301,6 @@ export const migrations: Migration[] = [
     `,
   },
 ];
+
+/** Newest schema this version of the program knows. */
+export const latestSchemaVersion = Math.max(...migrations.map((m) => m.version));

@@ -1,0 +1,10 @@
+[Unit]
+Description=Warehouse IMS: nightly check for updates
+
+[Timer]
+OnCalendar=*-*-* @UPDATE_TIME@:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,6 +1,6 @@
 {
   "name": "warehouse-ims",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "Inventory Management System with barcode scanning, Excel import/export and full audit trail",
   "workspaces": [
@@ -16,7 +16,11 @@
     "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
     "desktop": "npm ci --prefix desktop && npm run start --prefix desktop",
     "desktop:win": "npm ci --prefix desktop && npm run dist:win --prefix desktop",
-    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs e2e/forms.e2e.mjs"
+    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs e2e/forms.e2e.mjs",
+    "e2e:desktop": "xvfb-run -a node --test --test-timeout=300000 e2e/desktop.e2e.mjs",
+    "test:server-lifecycle": "sudo -E env \"PATH=$PATH\" deploy/test/lifecycle.sh",
+    "version:patch": "npm version patch --no-git-tag-version --workspaces --include-workspace-root",
+    "version:minor": "npm version minor --no-git-tag-version --workspaces --include-workspace-root"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

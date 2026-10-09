@@ -1,0 +1,17 @@
+# HTTPS in front of the app. Caddy gets and renews the certificate (Let's Encrypt) by itself;
+# DOMAIN must point (DNS A record) to this server and ports 80 and 443 must be open.
+# DOMAIN=:80 serves plain HTTP only, for a closed office network.
+{$DOMAIN} {
+	{$IMS_TLS}
+	encode zstd gzip
+	reverse_proxy app:4000 {
+		# Live updates (server-sent events) must not be buffered.
+		flush_interval -1
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+}

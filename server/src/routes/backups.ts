@@ -8,6 +8,7 @@ import { actorOf } from '../middleware/auth.js';
 import { audit } from '../lib/audit.js';
 import { BACKUP_FILE_RE, backupDir, defaultBackupDir, listBackups, restoreFrom, runBackup } from '../lib/backup.js';
 import { badRequest, notFound } from '../lib/errors.js';
+import { downloadRemote, listRemote, offsiteStatus, syncOffsite, testOffsite } from '../lib/offsite.js';
 
 export const backupsRouter = Router();
 
@@ -29,6 +30,7 @@ backupsRouter.get('/', (_req, res) => {
       keep: Number(getSetting('backup_keep', db)) || 30,
       lastBackupAt: getSetting('last_backup_at', db) || null,
       files: listBackups(db),
+      offsite: offsiteStatus(db),
     },
   });
 });
@@ -74,3 +76,34 @@ backupsRouter.post('/restore-upload', upload.single('file'), async (req, res) =>
   }
 });
 
+
+// ---- Copies in cloud storage (configured on the server, see lib/offsite.ts) -----------------
+
+backupsRouter.post('/offsite/test', async (_req, res) => {
+  res.json({ data: await testOffsite() });
+});
+
+backupsRouter.post('/offsite/sync', async (req, res) => {
+  const result = await syncOffsite();
+  if (result.uploaded.length)
+    audit(getDb(), actorOf(req), { action: 'BACKUP.OFFSITE', entityType: 'backup', description: `${req.user!.username} uploaded ${result.uploaded.join(', ')} to cloud storage.` });
+  res.json({ data: { ...result, offsite: offsiteStatus() } });
+});
+
+backupsRouter.get('/offsite/files', async (_req, res) => {
+  res.json({ data: await listRemote() });
+});
+
+backupsRouter.post('/offsite/:name/restore', async (req, res) => {
+  const name = String(req.params.name ?? '');
+  if (!BACKUP_FILE_RE.test(name)) throw badRequest('Invalid backup file name');
+  const actor = actorOf(req);
+  const file = await downloadRemote(name);
+  const result = await restoreFrom(file);
+  audit(getDb(), actor, {
+    action: 'BACKUP.RESTORE',
+    entityType: 'backup',
+    description: `${actor.username} restored ${name} from cloud storage. Previous data saved as ${result.safetyBackup}.`,
+  });
+  res.json({ data: { restored: name, ...result } });
+});

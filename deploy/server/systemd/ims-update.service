@@ -1,0 +1,10 @@
+[Unit]
+Description=Warehouse IMS: install a new version if there is one (backup first, rollback on failure)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@IMS_HOME@/ims update --auto
+TimeoutStartSec=45min

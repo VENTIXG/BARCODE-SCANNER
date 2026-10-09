@@ -7,6 +7,9 @@
  *
  * Optional: ELECTRON_DIST=<folder with electron-vX-win32-x64.zip> to use a
  * pre-downloaded Electron instead of downloading it.
+ *
+ * Output: release/Warehouse-IMS-Setup.exe and release/latest.yml (version and SHA-512 of the
+ * installer, read by the auto-updater of installed copies).
  */
 const path = require('node:path');
 
@@ -21,7 +24,15 @@ const pkg = require(path.join(__dirname, '..', 'package.json'));
 build({
   projectDir: path.join(__dirname, '..'),
   targets: Platform.WINDOWS.createTarget(['nsis'], Arch.x64),
-  config: { ...pkg.build, ...(process.env.ELECTRON_DIST ? { electronDist: process.env.ELECTRON_DIST } : {}) },
+  // Writes latest.yml (read by the auto-updater) but uploads nothing: the release workflow publishes.
+  publish: 'never',
+  // Only overrides: electron-builder reads the "build" field of package.json itself (passing it
+  // again merges its arrays, such as "publish", into a broken shape).
+  config: {
+    ...(process.env.ELECTRON_DIST ? { electronDist: process.env.ELECTRON_DIST } : {}),
+    // IMS_BUILD_OUTPUT=<folder>: a second build next to the first (the update test builds an older copy).
+    ...(process.env.IMS_BUILD_OUTPUT ? { directories: { ...pkg.build.directories, output: process.env.IMS_BUILD_OUTPUT } } : {}),
+  },
 })
   .then((files) => {
     console.log('\nBuilt:');

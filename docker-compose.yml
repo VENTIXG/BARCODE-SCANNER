@@ -1,12 +1,14 @@
-# Production stack: the app plus Caddy (HTTPS). Configure with a .env file next to this file.
+# Build and run the server from this checkout (development, staging, trying changes).
+# Real servers are installed with deploy/install.sh instead: prebuilt images, automatic
+# updates with rollback, backups (see deploy/DEPLOY.md).
 #   cp .env.example .env   -> set DOMAIN, JWT_SECRET, ADMIN_PASSWORD, COOKIE_SECURE
 #   docker compose up -d --build
-name: warehouse-ims
+name: warehouse-ims-dev
 
 services:
   app:
     build: .
-    image: warehouse-ims:${IMS_TAG:-local}
+    image: warehouse-ims:dev
     restart: unless-stopped
     environment:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (a long random string)}
@@ -26,11 +28,12 @@ services:
       - app
     environment:
       DOMAIN: ${DOMAIN:?Set DOMAIN in .env (e.g. ims.example.com, or :80 for a LAN)}
+      IMS_TLS: ${IMS_TLS:-}
     ports:
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/server/caddy:/etc/caddy:ro
       - caddy-data:/data
       - caddy-config:/config
 

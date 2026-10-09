@@ -1,0 +1,63 @@
+# Warehouse IMS production stack, installed and kept up to date by install.sh and `ims`.
+# Settings: .env next to this file (created by install.sh). Data: ./data. Do not edit here:
+# updates replace this file. Put local changes in docker-compose.override.yml instead.
+name: warehouse-ims
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  app:
+    image: warehouse-ims:${IMS_VERSION:?IMS_VERSION is not set in .env}
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is not set in .env}
+      # Used only when the database is created (first start); install.sh clears it afterwards.
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      REQUIRE_ADMIN_PASSWORD: "true"
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_HOURS: ${SESSION_HOURS:-12}
+      TZ: ${TZ:-Europe/Athens}
+      IMS_STATE_DIR: /ims-state
+      IMS_REQUEST_DIR: /ims-requests
+      # Cloud copies of backups (optional; set with `ims offsite`).
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      S3_PREFIX: ${S3_PREFIX:-}
+      S3_KEEP: ${S3_KEEP:-}
+      BACKUP_PASSPHRASE: ${BACKUP_PASSPHRASE:-}
+    volumes:
+      - ./data:/data
+      - ./state:/ims-state:ro
+      - ./requests:/ims-requests
+    expose:
+      - "4000"
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is not set in .env}
+      IMS_TLS: ${IMS_TLS:-}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - ./caddy:/etc/caddy:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging: *logging
+
+volumes:
+  caddy-data:
+  caddy-config:

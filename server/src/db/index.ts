@@ -48,6 +48,16 @@ export function migrate(db: DB, list: Migration[] = migrations, backupDir: strin
   const applied = new Set(
     db.prepare('SELECT version FROM schema_migrations').pluck().all() as number[],
   );
+  // An older program must not touch a database that a newer one has upgraded (after a
+  // rollback, for example): it could misread or damage data it does not know about.
+  const known = Math.max(0, ...list.map((m) => m.version));
+  const newest = Math.max(0, ...applied);
+  if (newest > known) {
+    throw new Error(
+      `This database was upgraded by a newer version of Warehouse IMS (database schema ${newest}; this version knows up to ${known}). ` +
+        'Install the newer version again, or restore a backup made before the upgrade.',
+    );
+  }
   const pending = list.filter((m) => !applied.has(m.version)).sort((a, b) => a.version - b.version);
   if (!pending.length) return;
 

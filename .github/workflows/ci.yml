@@ -1,16 +1,18 @@
 name: CI
 
-# Runs on every push and pull request: types, unit/API tests, production build and
-# the two-PC end-to-end test (two browsers against one real server).
+# Pull requests, and every push through the Release workflow (which calls this first):
+# types, unit/API tests (with an S3-compatible server for cloud backups), production build,
+# browser tests (two PCs, typing in every form), the desktop app under a virtual display,
+# and the whole server life cycle (install, update, rollback) with Docker.
 on:
-  push:
   pull_request:
+  workflow_call:
   workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v5
 
@@ -18,6 +20,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
 
       - name: Install
         run: npm ci
@@ -25,7 +30,15 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: S3-compatible server for the cloud backup tests
+        run: |
+          docker run -d --name s3 -p 9000:7070 versity/versitygw:v1.8.0 --access testkey --secret testsecret123456 posix /tmp
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:9000 && break; sleep 1; done
+          curl -fsS -X PUT --aws-sigv4 "aws:amz:us-east-1:s3" --user testkey:testsecret123456 http://127.0.0.1:9000/ims-backups
+
       - name: Unit and API tests
+        env:
+          S3_TEST_ENDPOINT: http://127.0.0.1:9000
         run: npm test
 
       - name: Build
@@ -34,5 +47,27 @@ jobs:
       - name: Browser for end-to-end tests
         run: npx playwright install --with-deps chromium
 
-      - name: End-to-end (two PCs)
+      - name: End-to-end (two PCs, forms)
         run: npm run e2e
+
+      - name: Desktop app (Electron) end-to-end
+        run: |
+          npm ci --prefix desktop
+          node desktop/node_modules/electron/install.js
+          node desktop/scripts/stage.mjs
+          xvfb-run -a node --test --test-timeout=300000 e2e/desktop.e2e.mjs
+
+  server-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Install, update, broken update with rollback, backup, restore (real Docker)
+        run: sudo -E env "PATH=$PATH" deploy/test/lifecycle.sh

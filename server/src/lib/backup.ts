@@ -80,7 +80,14 @@ function prune(db: DB) {
 
 let running: Promise<BackupFile> | null = null;
 
-export type BackupLabel = 'auto' | 'manual' | 'before-restore' | 'before-demo';
+export type BackupLabel = 'auto' | 'manual' | 'before-restore' | 'before-demo' | 'before-update';
+
+const listeners: ((file: BackupFile) => void)[] = [];
+
+/** Run `listener` after every successful backup (used for the cloud copies). */
+export function onBackup(listener: (file: BackupFile) => void) {
+  listeners.push(listener);
+}
 
 export function runBackup(label: BackupLabel = 'auto', db: DB = getDb()): Promise<BackupFile> {
   // Never run two backups at the same time.
@@ -97,7 +104,15 @@ export function runBackup(label: BackupLabel = 'auto', db: DB = getDb()): Promis
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
     ).run(nowIso(), nowIso());
     prune(db);
-    return { name, size: fs.statSync(file).size, createdAt: nowIso() };
+    const result = { name, size: fs.statSync(file).size, createdAt: nowIso() };
+    for (const l of listeners) {
+      try {
+        l(result);
+      } catch (e) {
+        console.error('[backup] listener failed:', e);
+      }
+    }
+    return result;
   })().finally(() => {
     running = null;
   });

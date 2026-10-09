@@ -9,6 +9,7 @@ import { errMsg } from '../lib/queries';
 import { beep, setSoundEnabled, soundEnabled } from '../lib/scanner';
 import { useTheme } from '../lib/theme';
 import { BackupsCard } from '../components/BackupsCard';
+import { UpdatesCard } from '../components/UpdatesCard';
 import { Button, Card, CardHeader, Checkbox, ErrorBox, Field, Input, PageHeader, Segmented } from '../components/ui';
 
 interface Warehouse {
@@ -146,6 +147,7 @@ export default function Settings() {
             </Card>
           )}
           <BackupsCard />
+          <UpdatesCard />
           {settings.error && <ErrorBox error={errMsg(settings.error)} />}
         </>
       )}

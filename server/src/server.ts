@@ -4,6 +4,7 @@ import { config } from './config.js';
 import { closeDb, getDb } from './db/index.js';
 import { createApp } from './app.js';
 import { startBackupScheduler, stopBackupScheduler } from './lib/backup.js';
+import { startOffsiteSync, stopOffsiteSync } from './lib/offsite.js';
 
 export interface RunningServer {
   port: number;
@@ -31,6 +32,7 @@ export async function startServer(
 ): Promise<RunningServer> {
   getDb(); // open + migrate before accepting requests
   startBackupScheduler();
+  startOffsiteSync();
   const server = http.createServer(createApp());
   const port = opts.port ?? config.port;
   try {
@@ -46,6 +48,7 @@ export async function startServer(
     close: () =>
       new Promise<void>((resolve) => {
         stopBackupScheduler();
+        stopOffsiteSync();
         server.closeAllConnections?.();
         server.close(() => {
           closeDb();

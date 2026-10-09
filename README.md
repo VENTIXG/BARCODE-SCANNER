@@ -32,67 +32,73 @@ Without the seed, an empty database is created on first start with a single
 
 `npm run seed -- --reset` deletes the database and recreates the demo data.
 
-## Windows desktop app (recommended for a single PC)
+## Many PCs: your own server and domain (recommended)
 
-The app also ships as a normal Windows program: an installer (`Warehouse-IMS-Setup-<version>.exe`),
-a desktop shortcut, its own window, no Node.js and no browser needed.
+One server in the cloud (any VPS with Ubuntu/Debian, x86_64 or arm64), your own address with
+HTTPS, every PC and tablet on the same data, live. Installed with one command:
 
-**Download:** https://github.com/VENTIXG/BARCODE-SCANNER/releases/latest/download/Warehouse-IMS-Setup.exe
+```bash
+curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/install.sh | sudo bash
+```
+
+It runs by itself afterwards: daily backups (optionally also to S3-compatible cloud storage:
+Backblaze B2, Cloudflare R2, AWS S3, Wasabi…), automatic updates every night with a backup first and
+an automatic rollback if the new version does not start, a watchdog every 5 minutes, automatic HTTPS
+certificates and OS security updates. Step-by-step guide (Greek): **[deploy/DEPLOY.md](deploy/DEPLOY.md)**.
+
+PCs open the address in Chrome/Edge (installable as an app) or use the Windows app below.
+
+## Windows app
+
+**Download:** https://github.com/ventixg/barcode-scanner/releases/latest/download/Warehouse-IMS-Setup.exe
 (permanent link to the latest version, no GitHub account needed).
 
-**Install:** run `Warehouse-IMS-Setup.exe`. The installer is not code-signed yet, so Windows
-SmartScreen may say *"Windows protected your PC"*: click **More info → Run anyway**.
-First sign-in: `admin` / `admin123`; you are asked to change the password, and an empty
-database offers **Load demo data** or **Excel import**.
+On first start it asks how this PC works:
 
-**Where things are**
+- **Company server**: type the server address; the app opens it in its own window (many PCs, one database).
+- **This PC only**: a built-in server with this PC's own database, no server needed (one workstation).
+  Copies made with version 1.x keep their data and start in this mode without asking.
 
-| What | Where |
+Change it later from the *Σύνδεση* menu. The app **updates itself**: it checks every 4 hours, downloads a
+new version in the background and installs it on the next restart (or at once, if the user agrees); in
+this-PC-only mode it backs up the database first.
+
+The installer is not code-signed, so Windows SmartScreen may say *"Windows protected your PC"*:
+click **More info → Run anyway**. First sign-in in this-PC-only mode: `admin` / `admin123` (you are
+asked to change it).
+
+| What (this-PC-only mode) | Where |
 |---|---|
 | Program | `%LOCALAPPDATA%\Programs\Warehouse IMS` (or the folder chosen during setup) |
 | Database, photos | `%APPDATA%\Warehouse IMS\data` (*File → Open data folder*) |
-| Backups | `%APPDATA%\Warehouse IMS\data\backups`, or the folder set in *Settings → Backups* |
+| Backups | `%APPDATA%\Warehouse IMS\data\backups`, or the folder set in *Settings → Backups* (a OneDrive/Google Drive folder gives a cloud copy) |
 | Log file | `%APPDATA%\Warehouse IMS\logs\main.log` (*File → Open log file*) |
 
-Uninstalling or installing a newer version keeps the data folder.
+Uninstalling or updating keeps the data folder. Moving this PC's data to a server:
+*Settings → Backups → Download* here, *Restore from file…* on the server.
 
-**Backups:** a full copy of the database is taken automatically once a day (also when the app is
-closed and a backup is due), the last 30 are kept. *Settings → Backups* has *Back up now*, a folder
-picker (choose a USB stick, second disk or OneDrive folder), download and **restore** — restoring
-first saves the current data, so it can be undone.
+Build it yourself: `npm install`, then `npm run desktop:win` → `desktop/release/` (works on Linux/macOS
+without Wine, see `desktop/scripts/build-win.cjs`). Try it without an installer: `npm run desktop`.
 
-**Build the installer yourself**
+## Releases
 
-- Automatically: every push runs the *Windows installer* GitHub Actions workflow on a Windows
-  machine. On the default branch it also creates/refreshes the GitHub Release `v<version>`
-  (version from `package.json`; bump it to publish a new release). Other branches: download the
-  `.exe` from the run's *Artifacts*.
-- On a Windows PC: `npm install` then `npm run desktop:win` → `desktop/release/`.
-- On Linux/macOS the same command works without Wine (see `desktop/scripts/build-win.cjs`).
-- Try the desktop app without building an installer: `npm run desktop`.
-
-## Server mode (several PCs, one database)
-
-One server runs the app; every PC uses it from its browser. Changes appear on all
-open screens immediately. Installation with Docker and HTTPS, backups, updates and
-rollback: **[deploy/DEPLOY.md](deploy/DEPLOY.md)** (in Greek).
-
-```bash
-cp .env.example .env     # DOMAIN, JWT_SECRET, ADMIN_PASSWORD
-docker compose up -d --build
-deploy/update.sh v1.2.0  # later: update (copies the database first, rolls back on failure)
-```
+`npm run version:patch` (or `version:minor`), commit, push to the default branch. The *Release*
+workflow runs every test, builds the server images (x86_64, arm64), the Windows installer with its
+update file (`latest.yml`), checks on a real Windows machine that an installed older copy updates itself,
+and publishes the GitHub Release `v<version>`. Servers and Windows apps pick it up by themselves.
+Pushes without a new version build and test everything without publishing (files under the run's *Artifacts*).
 
 ## Tests
 
 ```bash
-npm test             # 37 unit / API tests (real SQLite database, real HTTP)
-npm run e2e          # two PCs (two browsers) against one real server, incl. server restart
+npm test                       # unit / API tests (real SQLite, real HTTP); with S3_TEST_ENDPOINT also cloud backups
 npm run typecheck
+npm run build && npm run e2e   # browsers: two PCs on one server (live updates, reconnect), typing in every form
+npm run stage --prefix desktop && npm run e2e:desktop   # the Electron app: start screen, server/offline/local modes
+npm run test:server-lifecycle  # Docker: install.sh, update, broken update with automatic rollback, backup/restore
 ```
 
-CI (`.github/workflows/ci.yml`) runs all of the above on every push. The Windows installer
-is built by `.github/workflows/windows-installer.yml`.
+CI runs all of them (`.github/workflows/ci.yml`); the Windows auto-update test runs in `release.yml`.
 
 ---
 

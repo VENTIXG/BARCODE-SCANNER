@@ -1,0 +1,9 @@
+[Unit]
+Description=Warehouse IMS: "Check for updates now" pressed in the app
+
+[Path]
+PathExistsGlob=@IMS_HOME@/requests/update-now
+Unit=ims-request.service
+
+[Install]
+WantedBy=multi-user.target

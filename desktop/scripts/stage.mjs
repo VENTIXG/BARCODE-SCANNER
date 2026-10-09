@@ -29,11 +29,12 @@ const copy = (from, to) => fs.cpSync(path.join(root, from), path.join(app, to), 
 copy('server/dist', 'server/dist');
 copy('client/dist', 'client/dist');
 fs.writeFileSync(path.join(app, 'server', 'package.json'), JSON.stringify({ type: 'module' }, null, 2));
-for (const f of ['main.cjs', 'preload.cjs']) fs.copyFileSync(path.join(desktop, f), path.join(app, f));
+for (const f of ['main.cjs', 'preload.cjs', 'setup.html', 'setup.js', 'offline.html', 'offline.js']) fs.copyFileSync(path.join(desktop, f), path.join(app, f));
 fs.copyFileSync(path.join(desktop, 'build', 'icon.png'), path.join(app, 'icon.png'));
 
 const rootPkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const serverPkg = JSON.parse(fs.readFileSync(path.join(root, 'server', 'package.json'), 'utf8'));
+const desktopPkg = JSON.parse(fs.readFileSync(path.join(desktop, 'package.json'), 'utf8'));
 fs.writeFileSync(
   path.join(app, 'package.json'),
   JSON.stringify(
@@ -45,7 +46,8 @@ fs.writeFileSync(
       author: 'Warehouse IMS',
       license: 'UNLICENSED',
       main: 'main.cjs',
-      dependencies: serverPkg.dependencies,
+      // The server's dependencies plus the updater of the desktop app.
+      dependencies: { ...serverPkg.dependencies, ...desktopPkg.dependencies },
       overrides: rootPkg.overrides,
     },
     null,

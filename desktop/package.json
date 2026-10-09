@@ -32,7 +32,7 @@
         }
       ],
       "icon": "build/icon.png",
-      "artifactName": "Warehouse-IMS-Setup-${version}.${ext}"
+      "artifactName": "Warehouse-IMS-Setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -57,10 +57,18 @@
       "icon": "build/icon.png",
       "category": "Office"
     },
-    "publish": null
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://github.com/ventixg/barcode-scanner/releases/latest/download"
+      }
+    ]
   },
   "devDependencies": {
     "electron": "^44.5.1",
     "electron-builder": "^26.15.3"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

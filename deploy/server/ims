@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+# ims: manage the Warehouse IMS server installed by install.sh.
+#
+#   ims status                  version, health, backups, automatic updates
+#   ims update                  install the newest version now
+#   ims rollback                return to the version that ran before the last update
+#   ims backup                  back up the database now
+#   ims restore <file>          replace the database with a backup (the current data is kept as a copy)
+#   ims reset-password <user>   new temporary password, e.g. for a locked-out administrator
+#   ims offsite                 set up copies of the backups in cloud storage (S3-compatible)
+#   ims auto-update on [HH:MM] | off
+#   ims logs | start | stop | restart
+#
+# Every update: database backup -> new version -> health check. If the new version does not
+# become healthy, the previous version is started again (and its database copy restored
+# when the new version had already upgraded the database).
+#
+# Files: /opt/warehouse-ims/.env (settings), data/ (database, photos, backups),
+#        state/ (update status, shown in the app), requests/ ("check now" from the app).
+set -Eeuo pipefail
+umask 022
+
+IMS_HOME="${IMS_HOME:-/opt/warehouse-ims}"
+ENV_FILE="$IMS_HOME/.env"
+STATE_DIR="$IMS_HOME/state"
+REQUEST_DIR="$IMS_HOME/requests"
+DATA_DIR="$IMS_HOME/data"
+DOWNLOAD_DIR="$IMS_HOME/releases"
+DEFAULT_RELEASES_URL="https://github.com/ventixg/barcode-scanner/releases"
+APP_UID=1000 # user "node" inside the image
+HEALTH_TIMEOUT="${IMS_HEALTH_TIMEOUT:-180}"
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'ΠΡΟΣΟΧΗ: %s\n' "$*" >&2; }
+die() {
+  printf 'ΣΦΑΛΜΑ: %s\n' "$*" >&2
+  exit 1
+}
+
+need_root() { [[ $EUID -eq 0 ]] || die "Τρέξτε την εντολή με sudo: sudo ims $*"; }
+has_systemd() { [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null; }
+
+# ---- .env ---------------------------------------------------------------------------------
+
+env_get() { # KEY [default]
+  local v
+  v="$(grep -E "^$1=" "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2-)" || true
+  if [[ "$v" == \'*\' ]]; then
+    v="${v:1:${#v}-2}"
+  elif [[ "$v" == \"*\" ]]; then
+    v="${v:1:${#v}-2}"
+  fi
+  printf '%s' "${v:-${2:-}}"
+}
+
+# Values are written in single quotes, so Docker Compose takes them literally ($, #, spaces).
+env_set() { # KEY VALUE
+  local tmp line
+  [[ "$2" != *"'"* ]] || die "Η τιμή του $1 δεν μπορεί να περιέχει το σύμβολο '"
+  line="$1='$2'"
+  tmp="$(mktemp "$ENV_FILE.XXXX")"
+  if grep -qE "^$1=" "$ENV_FILE" 2>/dev/null; then
+    K="$1" L="$line" awk 'index($0, ENVIRON["K"] "=") == 1 { print ENVIRON["L"]; next } { print }' "$ENV_FILE" >"$tmp"
+  else
+    cat "$ENV_FILE" >"$tmp" 2>/dev/null || true
+    printf '%s\n' "$line" >>"$tmp"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$ENV_FILE"
+}
+
+releases_url() { env_get IMS_RELEASES_URL "$DEFAULT_RELEASES_URL"; }
+
+# ---- Docker -------------------------------------------------------------------------------
+
+# stdin from /dev/null: docker must never read input meant for someone else (e.g. curl | bash).
+dc() { docker compose --project-directory "$IMS_HOME" --env-file "$ENV_FILE" "$@" </dev/null; }
+app_id() { dc ps -q app 2>/dev/null || true; }
+app_running() { [[ -n "$(dc ps -q --status running app 2>/dev/null || true)" ]]; }
+
+container_health() {
+  local id
+  id="$(app_id)"
+  [[ -n "$id" ]] || {
+    echo missing
+    return
+  }
+  docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$id" 2>/dev/null || echo missing
+}
+
+running_version() {
+  dc exec -T app node -e "fetch('http://127.0.0.1:4000/api/health').then(r=>r.json()).then(j=>console.log(j.version)).catch(()=>process.exit(1))" 2>/dev/null
+}
+
+# Healthy = the app answers /api/health with the expected version three times in a row.
+wait_healthy() { # VERSION
+  local end=$((SECONDS + HEALTH_TIMEOUT)) ok=0 v
+  while ((SECONDS < end)); do
+    v="$(running_version || true)"
+    if [[ "$v" == "$1" ]]; then
+      ok=$((ok + 1))
+      ((ok >= 3)) && return 0
+    else
+      ok=0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+# A command inside the app image: in the running app, or in a temporary container.
+app_cli() {
+  if app_running; then
+    dc exec -T app node server/dist/cli.js "$@"
+  else
+    dc run --rm --no-deps -T app node server/dist/cli.js "$@"
+  fi
+}
+
+# Schema version of a database file under data/ (works with every version of the image).
+schema_of() { # path relative to data/
+  dc run --rm --no-deps -T --entrypoint node app -e "
+    const D = require('better-sqlite3');
+    const db = new D(process.argv[1], { readonly: true, fileMustExist: true });
+    const t = db.prepare(\"SELECT COUNT(*) c FROM sqlite_master WHERE name = 'schema_migrations'\").get().c;
+    console.log(t ? db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v : 0);" "/data/$1" 2>/dev/null | tail -n1
+}
+
+# ---- Status for the app (state/update.json) ----------------------------------------------
+
+STATUS_FILE="$STATE_DIR/update.env"
+HISTORY_FILE="$STATE_DIR/history.tsv"
+
+json_str() {
+  local s="${1-}"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/ }"
+  s="${s//$'\r'/ }"
+  s="${s//$'\t'/ }"
+  printf '"%s"' "$s"
+}
+
+status_get() { grep -E "^$1=" "$STATUS_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- || true; }
+
+status_set() { # KEY=VALUE ...
+  mkdir -p "$STATE_DIR"
+  touch "$STATUS_FILE"
+  local kv k tmp
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    tmp="$(mktemp "$STATUS_FILE.XXXX")"
+    grep -vE "^$k=" "$STATUS_FILE" >"$tmp" || true
+    printf '%s\n' "${kv//$'\n'/ }" >>"$tmp"
+    mv "$tmp" "$STATUS_FILE"
+  done
+  chmod 644 "$STATUS_FILE"
+  status_render
+}
+
+history_add() { # FROM TO RESULT MESSAGE
+  mkdir -p "$STATE_DIR"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$1" "$2" "$3" "${4//$'\t'/ }" >>"$HISTORY_FILE"
+  tail -n 50 "$HISTORY_FILE" >"$HISTORY_FILE.tmp" && mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
+  chmod 644 "$HISTORY_FILE"
+  status_render
+}
+
+status_render() {
+  local auto history="" at from to result msg first=1
+  auto="$(env_get IMS_AUTO_UPDATE true)"
+  if [[ -f "$HISTORY_FILE" ]]; then
+    while IFS=$'\t' read -r at from to result msg; do
+      [[ -n "$at" ]] || continue
+      ((first)) || history+=","
+      first=0
+      history+="{\"at\":$(json_str "$at"),\"from\":$(json_str "$from"),\"to\":$(json_str "$to"),\"result\":$(json_str "$result"),\"message\":$(json_str "$msg")}"
+    done < <(tac "$HISTORY_FILE" | head -n 10)
+  fi
+  local tmp="$STATE_DIR/update.json.tmp"
+  cat >"$tmp" <<JSON
+{
+  "autoUpdate": $([[ "$auto" == true ]] && echo true || echo false),
+  "updateTime": $(json_str "$(env_get IMS_UPDATE_TIME 03:30)"),
+  "currentVersion": $(json_str "$(env_get IMS_VERSION)"),
+  "previousVersion": $(json_str "$(env_get IMS_PREVIOUS_VERSION)"),
+  "state": $(json_str "$(status_get state)"),
+  "lastResult": $(json_str "$(status_get lastResult)"),
+  "message": $(json_str "$(status_get message)"),
+  "lastCheckAt": $(json_str "$(status_get lastCheckAt)"),
+  "latestVersion": $(json_str "$(status_get latestVersion)"),
+  "history": [${history}]
+}
+JSON
+  chmod 644 "$tmp"
+  mv "$tmp" "$STATE_DIR/update.json"
+}
+
+# ---- Releases -----------------------------------------------------------------------------
+
+arch() {
+  case "$(uname -m)" in
+    x86_64 | amd64) echo amd64 ;;
+    aarch64 | arm64) echo arm64 ;;
+    *) die "Αρχιτεκτονική $(uname -m) δεν υποστηρίζεται (μόνο x86_64 και arm64)" ;;
+  esac
+}
+
+valid_version() { [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+version_gt() { # A > B
+  [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]
+}
+
+latest_version() {
+  local v
+  v="$(curl -fsSL --retry 3 --max-time 30 "$(releases_url)/latest/download/VERSION" | tr -d '[:space:]')" || return 1
+  valid_version "$v" || return 1
+  printf '%s' "$v"
+}
+
+# Download and verify the files of a version into releases/<version>/.
+fetch_release() { # VERSION
+  local v="$1" dir="$DOWNLOAD_DIR/$1" base asset
+  base="$(releases_url)/download/v$v"
+  mkdir -p "$dir"
+  curl -fsSL --retry 3 --max-time 60 -o "$dir/SHA256SUMS" "$base/SHA256SUMS" || return 1
+  for asset in ims-server.tar.gz "ims-image-$(arch).tar.gz"; do
+    if [[ -f "$dir/$asset" ]] && (cd "$dir" && grep -E " \*?$asset\$" SHA256SUMS | sha256sum -c --status); then
+      continue
+    fi
+    say "  Λήψη $asset…"
+    curl -fsSL --retry 3 --max-time 1800 -o "$dir/$asset.part" "$base/$asset" || return 1
+    mv "$dir/$asset.part" "$dir/$asset"
+    (cd "$dir" && grep -E " \*?$asset\$" SHA256SUMS | sha256sum -c --status) || {
+      warn "Ο έλεγχος SHA-256 του $asset απέτυχε"
+      rm -f "$dir/$asset"
+      return 1
+    }
+  done
+}
+
+load_image() { # VERSION
+  docker image inspect "warehouse-ims:$1" >/dev/null 2>&1 && return 0
+  say "  Φόρτωση image $1…"
+  docker load -q -i "$DOWNLOAD_DIR/$1/ims-image-$(arch).tar.gz" >/dev/null || return 1
+  docker image inspect "warehouse-ims:$1" >/dev/null 2>&1
+}
+
+# Compose file and Caddy config of a version (from its downloaded ims-server.tar.gz).
+install_stack_files() { # VERSION
+  local tmp
+  tmp="$(mktemp -d)"
+  if ! tar -xzf "$DOWNLOAD_DIR/$1/ims-server.tar.gz" -C "$tmp" docker-compose.yml caddy/Caddyfile 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  mkdir -p "$IMS_HOME/caddy"
+  cp -f "$tmp/docker-compose.yml" "$IMS_HOME/docker-compose.yml"
+  if ! cmp -s "$tmp/caddy/Caddyfile" "$IMS_HOME/caddy/Caddyfile"; then
+    cp -f "$tmp/caddy/Caddyfile" "$IMS_HOME/caddy/Caddyfile"
+    CADDY_CHANGED=1
+  fi
+  rm -rf "$tmp"
+}
+
+# Everything of a version: compose file, Caddy config, this tool and the systemd units.
+install_files() { # VERSION
+  local tmp
+  tmp="$(mktemp -d)"
+  tar -xzf "$DOWNLOAD_DIR/$1/ims-server.tar.gz" -C "$tmp" || {
+    rm -rf "$tmp"
+    return 1
+  }
+  if [[ ! -f "$tmp/docker-compose.yml" || ! -f "$tmp/caddy/Caddyfile" || ! -f "$tmp/ims" ]]; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  install_stack_files "$1" || return 1
+  # Replace this script atomically: the running copy keeps reading the old file.
+  install -m 755 "$tmp/ims" "$IMS_HOME/ims.new" && mv -f "$IMS_HOME/ims.new" "$IMS_HOME/ims"
+  ln -sf "$IMS_HOME/ims" /usr/local/bin/ims
+  if [[ -d "$tmp/systemd" ]]; then
+    rm -rf "$IMS_HOME/systemd"
+    cp -r "$tmp/systemd" "$IMS_HOME/systemd"
+  fi
+  rm -rf "$tmp"
+  install_units
+}
+
+install_units() {
+  has_systemd || return 0
+  [[ -d "$IMS_HOME/systemd" ]] || return 0
+  local f time
+  time="$(env_get IMS_UPDATE_TIME 03:30)"
+  for f in "$IMS_HOME"/systemd/*; do
+    sed -e "s|@IMS_HOME@|$IMS_HOME|g" -e "s|@UPDATE_TIME@|$time|g" "$f" >"/etc/systemd/system/$(basename "$f")"
+  done
+  systemctl daemon-reload
+  systemctl enable --now ims-update.timer ims-watchdog.timer ims-request.path >/dev/null 2>&1 || warn "Δεν ενεργοποιήθηκαν οι χρονοδιακόπτες systemd"
+}
+
+prepare_dirs() {
+  mkdir -p "$DATA_DIR" "$STATE_DIR" "$REQUEST_DIR" "$DOWNLOAD_DIR"
+  chown "$APP_UID:$APP_UID" "$DATA_DIR" "$REQUEST_DIR"
+  chmod 755 "$STATE_DIR"
+}
+
+# Keep the images of the current and previous version, and their downloads.
+cleanup_old() {
+  local cur prev img v
+  cur="$(env_get IMS_VERSION)"
+  prev="$(env_get IMS_PREVIOUS_VERSION)"
+  while read -r img; do
+    v="${img#warehouse-ims:}"
+    [[ "$v" == "$cur" || "$v" == "$prev" ]] || docker rmi "$img" >/dev/null 2>&1 || true
+  done < <(docker images --format '{{.Repository}}:{{.Tag}}' 'warehouse-ims' 2>/dev/null)
+  for v in "$DOWNLOAD_DIR"/*; do
+    [[ -d "$v" ]] || continue
+    [[ "$(basename "$v")" == "$cur" || "$(basename "$v")" == "$prev" ]] || rm -rf "$v"
+  done
+  docker image prune -f >/dev/null 2>&1 || true
+}
+
+# ---- Update and rollback ------------------------------------------------------------------
+
+lock() {
+  exec 9>"$IMS_HOME/.lock"
+  flock -n 9 || die "Τρέχει ήδη άλλη εντολή ims (ενημέρωση ή επαναφορά). Δοκιμάστε σε λίγο."
+}
+
+restore_db_copy() { # backup file name under data/backups
+  say "  Επαναφορά του αντιγράφου βάσης $1…"
+  dc stop app >/dev/null 2>&1 || true
+  cp "$DATA_DIR/backups/$1" "$DATA_DIR/inventory.db.restoring"
+  rm -f "$DATA_DIR/inventory.db-wal" "$DATA_DIR/inventory.db-shm"
+  mv -f "$DATA_DIR/inventory.db.restoring" "$DATA_DIR/inventory.db"
+  chown "$APP_UID:$APP_UID" "$DATA_DIR/inventory.db"
+}
+
+# Keep the current database as a backup before an older copy replaces it.
+save_current_db() {
+  local name
+  name="$(app_cli backup before-rollback 2>/dev/null | tail -n1)" || name=""
+  if [[ -z "$name" || ! -f "$DATA_DIR/backups/$name" ]]; then
+    # The new version may not even start: copy the file with the app stopped.
+    dc stop app >/dev/null 2>&1 || true
+    name="inventory_$(date +%Y-%m-%d_%H%M%S)_before-rollback.db"
+    mkdir -p "$DATA_DIR/backups"
+    cp "$DATA_DIR/inventory.db" "$DATA_DIR/backups/$name" || return 1
+    chown "$APP_UID:$APP_UID" "$DATA_DIR/backups/$name"
+  fi
+  say "  Τα τρέχοντα δεδομένα φυλάχτηκαν: data/backups/$name"
+}
+
+# Back to IMS_PREVIOUS_VERSION. When the newer version has upgraded the database, the copy
+# taken before that update is restored (the older program cannot read the upgraded one).
+rollback_to_previous() { # REASON auto|manual
+  local cur prev backup now_schema copy_schema restore=0
+  cur="$(env_get IMS_VERSION)"
+  prev="$(env_get IMS_PREVIOUS_VERSION)"
+  backup="$(env_get IMS_LAST_UPDATE_BACKUP)"
+  [[ -n "$prev" ]] || die "Δεν υπάρχει προηγούμενη έκδοση για επιστροφή."
+  if ! docker image inspect "warehouse-ims:$prev" >/dev/null 2>&1; then
+    { fetch_release "$prev" && load_image "$prev"; } || die "Δεν βρέθηκε η έκδοση $prev."
+  fi
+  [[ -f "$DOWNLOAD_DIR/$prev/ims-server.tar.gz" ]] || fetch_release "$prev" || die "Δεν βρέθηκαν τα αρχεία της έκδοσης $prev."
+  if [[ -n "$backup" && -f "$DATA_DIR/backups/$backup" ]]; then
+    now_schema="$(schema_of inventory.db || echo '?')"
+    copy_schema="$(schema_of "backups/$backup" || echo '?')"
+    [[ "$now_schema" != "$copy_schema" ]] && restore=1
+  fi
+  if ((restore)) && [[ "$2" == manual && "${IMS_FORCE:-0}" != 1 ]]; then
+    warn "Η έκδοση $cur έχει αναβαθμίσει τη βάση και η $prev δεν μπορεί να τη διαβάσει."
+    warn "Θα επανέλθει το αντίγραφο $backup: ό,τι καταχωρήθηκε μετά από αυτό δεν θα φαίνεται (τα τωρινά δεδομένα φυλάσσονται ως αντίγραφο)."
+    has_tty || die "Για να συνεχίσετε: sudo IMS_FORCE=1 ims rollback"
+    ask "Συνέχεια; (ν/ο)" "ο"
+    [[ "$REPLY" =~ ^[νΝyY] ]] || die "Ακυρώθηκε. Τίποτα δεν άλλαξε."
+  fi
+  say "Επιστροφή στην έκδοση $prev…"
+  status_set state=updating "message=Επιστροφή στην έκδοση $prev"
+  if ((restore)); then save_current_db || die "Δεν φυλάχτηκαν τα τρέχοντα δεδομένα: η επιστροφή σταμάτησε."; fi
+  dc stop app >/dev/null 2>&1 || true
+  CADDY_CHANGED=0
+  install_stack_files "$prev" || die "Τα αρχεία της έκδοσης $prev είναι ελαττωματικά."
+  env_set IMS_VERSION "$prev"
+  env_set IMS_PREVIOUS_VERSION "$cur"
+  ((restore)) && restore_db_copy "$backup"
+  dc up -d --remove-orphans >/dev/null
+  [[ "$CADDY_CHANGED" == 1 ]] && dc restart caddy >/dev/null 2>&1 || true
+  if wait_healthy "$prev"; then
+    history_add "$cur" "$prev" rolled-back "$1"
+    status_set state=idle lastResult=rolled-back "message=$1"
+    say "Η έκδοση $prev τρέχει κανονικά."
+    return 0
+  fi
+  status_set state=idle lastResult=failed "message=Η επιστροφή στην $prev δεν ολοκληρώθηκε: δείτε sudo ims logs"
+  return 1
+}
+
+do_update() { # TARGET_VERSION
+  local target="$1" cur old_prev old_backup backup
+  cur="$(env_get IMS_VERSION)"
+  old_prev="$(env_get IMS_PREVIOUS_VERSION)"
+  old_backup="$(env_get IMS_LAST_UPDATE_BACKUP)"
+  say "Ενημέρωση από $cur σε $target"
+  status_set state=updating "message=Ενημέρωση σε $target" "latestVersion=$target"
+
+  say "1/5 Λήψη και έλεγχος αρχείων…"
+  if ! fetch_release "$target" || ! load_image "$target"; then
+    status_set state=idle lastResult=failed "message=Η λήψη της έκδοσης $target απέτυχε. Θα ξαναδοκιμάσει αργότερα."
+    die "Η λήψη της έκδοσης $target απέτυχε. Η τρέχουσα έκδοση συνεχίζει κανονικά."
+  fi
+
+  say "2/5 Backup της βάσης…"
+  backup="$(app_cli backup "before-update-v${target//./-}" | tail -n1)" || backup=""
+  if [[ -z "$backup" || ! -f "$DATA_DIR/backups/$backup" ]]; then
+    status_set state=idle lastResult=failed "message=Το backup πριν την ενημέρωση απέτυχε. Η ενημέρωση δεν έγινε."
+    die "Το backup απέτυχε. Η ενημέρωση δεν έγινε."
+  fi
+  say "  Αντίγραφο: data/backups/$backup"
+
+  say "3/5 Εγκατάσταση αρχείων…"
+  CADDY_CHANGED=0
+  if ! install_files "$target"; then
+    install_stack_files "$cur" || true
+    status_set state=idle lastResult=failed "message=Τα αρχεία της έκδοσης $target είναι ελαττωματικά."
+    die "Τα αρχεία της έκδοσης $target είναι ελαττωματικά. Η τρέχουσα έκδοση συνεχίζει κανονικά."
+  fi
+  env_set IMS_LAST_UPDATE_BACKUP "$backup"
+  env_set IMS_PREVIOUS_VERSION "$cur"
+  env_set IMS_VERSION "$target"
+
+  say "4/5 Εκκίνηση της $target…"
+  docker pull -q caddy:2 >/dev/null 2>&1 || true
+  if dc up -d --remove-orphans >/dev/null 2>&1; then
+    [[ "$CADDY_CHANGED" == 1 ]] && dc restart caddy >/dev/null 2>&1 || true
+    say "5/5 Έλεγχος λειτουργίας…"
+    if wait_healthy "$target"; then
+      env_set IMS_SKIP_VERSION ""
+      history_add "$cur" "$target" updated ""
+      status_set state=idle lastResult=updated "message=Ενημερώθηκε από $cur σε $target"
+      cleanup_old
+      say "Έτοιμο: τρέχει η έκδοση $target."
+      return 0
+    fi
+  fi
+  warn "Η έκδοση $target δεν ξεκίνησε σωστά. Επιστροφή στην $cur."
+  dc logs --tail 40 app 2>&1 | sed 's/^/    /' >&2 || true
+  env_set IMS_SKIP_VERSION "$target"
+  if rollback_to_previous "Η έκδοση $target δεν ξεκίνησε σωστά, έγινε αυτόματη επιστροφή στην $cur. Δεν θα ξαναδοκιμαστεί αυτόματα." auto; then
+    # As if the attempt never happened: "ims rollback" still goes to the version before $cur.
+    env_set IMS_PREVIOUS_VERSION "$old_prev"
+    env_set IMS_LAST_UPDATE_BACKUP "$old_backup"
+  fi
+  return 1
+}
+
+cmd_update() { # [--auto | --requested]
+  need_root update
+  lock
+  prepare_dirs
+  local mode="${1:-manual}" cur latest
+  cur="$(env_get IMS_VERSION)"
+  status_set state=checking "lastCheckAt=$(date -u +%FT%TZ)"
+  if ! latest="$(latest_version)"; then
+    status_set state=idle "message=Δεν ήταν δυνατή η σύνδεση με τον διακομιστή ενημερώσεων. Θα ξαναδοκιμάσει αργότερα."
+    die "Δεν βρέθηκε η τελευταία έκδοση (σύνδεση στο $(releases_url))."
+  fi
+  status_set "latestVersion=$latest"
+  if ! version_gt "$latest" "$cur"; then
+    status_set state=idle lastResult=up-to-date message=
+    say "Έχετε την πιο πρόσφατη έκδοση ($cur)."
+    return 0
+  fi
+  if [[ "$mode" == --auto ]]; then
+    if [[ "$(env_get IMS_AUTO_UPDATE true)" != true ]]; then
+      status_set state=idle lastResult=available "message=Οι αυτόματες ενημερώσεις είναι κλειστές."
+      say "Υπάρχει η έκδοση $latest (οι αυτόματες ενημερώσεις είναι κλειστές)."
+      return 0
+    fi
+    if [[ "$(env_get IMS_SKIP_VERSION)" == "$latest" ]]; then
+      status_set state=idle "message=Η έκδοση $latest παραλείπεται: απέτυχε σε προηγούμενη προσπάθεια."
+      say "Η έκδοση $latest παραλείπεται (απέτυχε πριν). Για νέα προσπάθεια: sudo ims update"
+      return 0
+    fi
+  fi
+  do_update "$latest"
+}
+
+cmd_rollback() {
+  need_root rollback
+  lock
+  rollback_to_previous "Χειροκίνητη επιστροφή (ims rollback)." manual
+}
+
+# ---- Other commands -----------------------------------------------------------------------
+
+cmd_status() {
+  local health v
+  say "Warehouse IMS — $IMS_HOME"
+  if [[ "$(env_get DOMAIN)" == ":80" ]]; then
+    say "  Διεύθυνση:          http://$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+  else
+    say "  Διεύθυνση:          https://$(env_get DOMAIN)"
+  fi
+  say "  Έκδοση:             $(env_get IMS_VERSION) (προηγούμενη: $(env_get IMS_PREVIOUS_VERSION '-'))"
+  health="$(container_health)"
+  v="$(running_version || true)"
+  say "  Κατάσταση app:      $health${v:+ (τρέχει η $v)}"
+  say "  Αυτόματες ενημ/σεις: $(env_get IMS_AUTO_UPDATE true) στις $(env_get IMS_UPDATE_TIME 03:30)"
+  say "  Τελευταίος έλεγχος: $(status_get lastCheckAt) — $(status_get lastResult) $(status_get message)"
+  say "  Backups:            $(find "$DATA_DIR/backups" -maxdepth 1 -name '*.db' 2>/dev/null | wc -l) αρχεία, τελευταίο: $(ls -1t "$DATA_DIR/backups"/*.db 2>/dev/null | head -n1 | xargs -r basename)"
+  say "  Cloud backup:       $([[ -n "$(env_get S3_BUCKET)" ]] && echo "ναι ($(env_get S3_BUCKET))" || echo 'όχι (sudo ims offsite)')"
+  say "  Ελεύθερος χώρος:    $(df -h "$IMS_HOME" | awk 'NR==2 {print $4 " από " $2}')"
+}
+
+cmd_backup() {
+  need_root backup
+  local name
+  name="$(app_cli backup manual | tail -n1)" || die "Το backup απέτυχε."
+  say "Αντίγραφο: $DATA_DIR/backups/$name"
+}
+
+cmd_restore() { # FILE
+  need_root restore
+  [[ -n "${1:-}" ]] || die "Χρήση: sudo ims restore <αρχείο .db ή όνομα από data/backups>"
+  lock
+  local src="$1" name
+  [[ -f "$src" ]] || src="$DATA_DIR/backups/$1"
+  [[ -f "$src" ]] || die "Δεν βρέθηκε το αρχείο $1"
+  name="restore-$(date +%Y%m%d%H%M%S).db"
+  mkdir -p "$DATA_DIR/backups"
+  cp "$src" "$DATA_DIR/$name"
+  chown "$APP_UID:$APP_UID" "$DATA_DIR/$name"
+  say "Διακοπή της εφαρμογής…"
+  dc stop app >/dev/null
+  if ! dc run --rm --no-deps -T app node server/dist/cli.js restore "/data/$name"; then
+    rm -f "$DATA_DIR/$name"
+    dc up -d app >/dev/null
+    die "Η επαναφορά απέτυχε. Τα τρέχοντα δεδομένα δεν άλλαξαν."
+  fi
+  rm -f "$DATA_DIR/$name"
+  dc up -d app >/dev/null
+  wait_healthy "$(env_get IMS_VERSION)" && say "Έτοιμο. Όλοι οι χρήστες συνδέονται ξανά." || warn "Η εφαρμογή δεν απάντησε: sudo ims logs"
+}
+
+cmd_reset_password() {
+  need_root reset-password
+  [[ -n "${1:-}" ]] || die "Χρήση: sudo ims reset-password <όνομα χρήστη>"
+  app_cli reset-password "$1"
+}
+
+has_tty() { (exec </dev/tty) 2>/dev/null; }
+
+ask() { # PROMPT [default] -> REPLY
+  local p="$1" d="${2:-}"
+  REPLY=""
+  if has_tty; then
+    read -r -p "$p${d:+ [$d]}: " REPLY </dev/tty || true
+  fi
+  REPLY="${REPLY:-$d}"
+}
+
+cmd_offsite() {
+  need_root offsite
+  has_tty || die "Η ρύθμιση γίνεται με ερωτήσεις: τρέξτε την από τερματικό (SSH)."
+  say "Αντίγραφα των backup σε cloud storage (S3-compatible)."
+  say "Χρειάζεστε ένα bucket και κλειδιά πρόσβασης από τον πάροχο, π.χ.:"
+  say "  Backblaze B2:   endpoint https://s3.<region>.backblazeb2.com  (π.χ. s3.eu-central-003.backblazeb2.com)"
+  say "  Cloudflare R2:  endpoint https://<account-id>.r2.cloudflarestorage.com, region auto"
+  say "  AWS S3:         κενό endpoint, region π.χ. eu-central-1"
+  say "  Wasabi:         endpoint https://s3.<region>.wasabisys.com"
+  say "Αφήστε το bucket κενό για να απενεργοποιήσετε τα αντίγραφα στο cloud."
+  ask "Endpoint (κενό για AWS)" "$(env_get S3_ENDPOINT)"
+  local endpoint="$REPLY"
+  ask "Region" "$(env_get S3_REGION us-east-1)"
+  local region="$REPLY"
+  ask "Bucket" "$(env_get S3_BUCKET)"
+  local bucket="$REPLY"
+  if [[ -z "$bucket" ]]; then
+    for k in S3_ENDPOINT S3_REGION S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_PREFIX; do env_set "$k" ""; done
+    dc up -d app >/dev/null
+    say "Τα αντίγραφα στο cloud απενεργοποιήθηκαν."
+    return 0
+  fi
+  ask "Access key ID" "$(env_get S3_ACCESS_KEY_ID)"
+  local key="$REPLY"
+  ask "Secret access key (δεν εμφανίζεται ξανά)" ""
+  local secret="${REPLY:-$(env_get S3_SECRET_ACCESS_KEY)}"
+  ask "Φάκελος μέσα στο bucket" "$(env_get S3_PREFIX warehouse-ims/)"
+  local prefix="$REPLY"
+  ask "Κρυπτογράφηση με κωδικό; Αν τον χάσετε, τα αντίγραφα δεν ανοίγουν. Κωδικός (κενό = χωρίς)" ""
+  local pass="${REPLY:-$(env_get BACKUP_PASSPHRASE)}"
+  env_set S3_ENDPOINT "$endpoint"
+  env_set S3_REGION "$region"
+  env_set S3_BUCKET "$bucket"
+  env_set S3_ACCESS_KEY_ID "$key"
+  env_set S3_SECRET_ACCESS_KEY "$secret"
+  env_set S3_PREFIX "$prefix"
+  env_set BACKUP_PASSPHRASE "$pass"
+  dc up -d app >/dev/null
+  wait_healthy "$(env_get IMS_VERSION)" || die "Η εφαρμογή δεν ξεκίνησε: sudo ims logs"
+  if app_cli offsite-test; then
+    app_cli offsite-sync || true
+    say "Έτοιμο: κάθε backup ανεβαίνει πλέον και στο cloud."
+    [[ -n "$pass" ]] && say "Φυλάξτε τον κωδικό κρυπτογράφησης κάπου ασφαλές, εκτός server."
+  else
+    warn "Η δοκιμή απέτυχε: ελέγξτε endpoint, region, bucket και κλειδιά (sudo ims offsite)."
+    return 1
+  fi
+}
+
+cmd_auto_update() { # on [HH:MM] | off
+  need_root auto-update
+  case "${1:-}" in
+    on)
+      env_set IMS_AUTO_UPDATE true
+      if [[ -n "${2:-}" ]]; then
+        [[ "$2" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] || die "Ώρα σε μορφή ΩΩ:ΛΛ, π.χ. 03:30"
+        env_set IMS_UPDATE_TIME "$2"
+      fi
+      install_units
+      say "Αυτόματες ενημερώσεις: ενεργές, κάθε βράδυ στις $(env_get IMS_UPDATE_TIME 03:30)."
+      ;;
+    off)
+      env_set IMS_AUTO_UPDATE false
+      say "Αυτόματες ενημερώσεις: κλειστές. Ενημέρωση με: sudo ims update"
+      ;;
+    *) die "Χρήση: sudo ims auto-update on [ΩΩ:ΛΛ] | off" ;;
+  esac
+  status_render
+}
+
+# Every 5 minutes (systemd timer): keep the app running.
+cmd_watchdog() {
+  [[ -f "$STATE_DIR/stopped" ]] && return 0
+  exec 9>"$IMS_HOME/.lock"
+  flock -n 9 || return 0 # an update or restore is running
+  local health
+  health="$(container_health)"
+  case "$health" in
+    healthy | starting) ;;
+    unhealthy)
+      echo "app unhealthy: restarting"
+      dc restart app >/dev/null 2>&1 || true
+      ;;
+    *)
+      echo "app $health: starting"
+      dc up -d >/dev/null 2>&1 || true
+      ;;
+  esac
+  local free_mb
+  free_mb="$(df -Pm "$IMS_HOME" | awk 'NR==2 {print $4}')"
+  if [[ -n "$free_mb" && "$free_mb" -lt 1024 ]]; then
+    echo "low disk space (${free_mb} MB): removing old images and downloads"
+    cleanup_old
+  fi
+}
+
+# First installation or repair (install.sh): files, image and start of a given version.
+cmd_bootstrap() { # VERSION
+  need_root bootstrap
+  valid_version "${1:-}" || die "Χρήση: ims bootstrap <έκδοση>"
+  lock
+  prepare_dirs
+  say "Λήψη της έκδοσης $1…"
+  fetch_release "$1" || die "Η λήψη της έκδοσης $1 απέτυχε ($(releases_url))."
+  load_image "$1" || die "Το image της έκδοσης $1 δεν φορτώθηκε."
+  CADDY_CHANGED=0
+  install_files "$1" || die "Τα αρχεία της έκδοσης $1 είναι ελαττωματικά."
+  env_set IMS_VERSION "$1"
+  say "Εκκίνηση…"
+  rm -f "$STATE_DIR/stopped"
+  dc up -d --remove-orphans >/dev/null
+  [[ "$CADDY_CHANGED" == 1 ]] && dc restart caddy >/dev/null 2>&1 || true
+  if ! wait_healthy "$1"; then
+    dc logs --tail 60 app >&2 || true
+    die "Η εφαρμογή δεν ξεκίνησε (δείτε τα μηνύματα παραπάνω)."
+  fi
+  status_set state=idle lastResult=up-to-date "lastCheckAt=$(date -u +%FT%TZ)" "latestVersion=$1" message=
+  cleanup_old
+}
+
+# Request left by the app ("Check for updates now" in Settings).
+cmd_handle_request() {
+  [[ -f "$REQUEST_DIR/update-now" ]] || return 0
+  rm -f "$REQUEST_DIR/update-now"
+  cmd_update --requested
+}
+
+case "${1:-help}" in
+  status) cmd_status ;;
+  update) shift; cmd_update "${1:-manual}" ;;
+  rollback) cmd_rollback ;;
+  backup) cmd_backup ;;
+  restore) shift; cmd_restore "${1:-}" ;;
+  reset-password) shift; cmd_reset_password "${1:-}" ;;
+  offsite) cmd_offsite ;;
+  auto-update) shift; cmd_auto_update "$@" ;;
+  logs) dc logs -f --tail 200 app ;;
+  start)
+    need_root start
+    rm -f "$STATE_DIR/stopped"
+    dc up -d
+    ;;
+  stop)
+    need_root stop
+    touch "$STATE_DIR/stopped"
+    dc stop
+    ;;
+  restart)
+    need_root restart
+    rm -f "$STATE_DIR/stopped"
+    dc restart
+    ;;
+  watchdog) cmd_watchdog ;;
+  handle-request) cmd_handle_request ;;
+  bootstrap) shift; cmd_bootstrap "${1:-}" ;;
+  render-status) status_render ;;
+  version) env_get IMS_VERSION ;;
+  help | -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "Άγνωστη εντολή: $1 (δείτε: ims help)" ;;
+esac

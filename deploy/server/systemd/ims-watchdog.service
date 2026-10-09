@@ -1,0 +1,8 @@
+[Unit]
+Description=Warehouse IMS: keep the app running and the disk tidy
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@IMS_HOME@/ims watchdog

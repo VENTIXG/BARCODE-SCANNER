@@ -1,0 +1,9 @@
+[Unit]
+Description=Warehouse IMS: handle a request from the app
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=@IMS_HOME@/ims handle-request
+TimeoutStartSec=45min

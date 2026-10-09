@@ -719,4 +719,73 @@ export const el: Record<string, string> = {
   'Size {size} is listed twice': 'Το μέγεθος {size} αναφέρεται δύο φορές',
   'A new version ({v}) is available. Reload to use it.': 'Υπάρχει νέα έκδοση ({v}). Ανανεώστε τη σελίδα για να τη χρησιμοποιήσετε.',
   Reload: 'Ανανέωση',
+
+  // Cloud copies of backups
+  'Copies in cloud storage': 'Αντίγραφα στο cloud',
+  Problem: 'Πρόβλημα',
+  On: 'Ενεργό',
+  Off: 'Ανενεργό',
+  Encrypted: 'Κρυπτογραφημένα',
+  'Every backup is also uploaded to {host}, bucket {bucket}, folder {prefix}. The newest {keep} are kept there.':
+    'Κάθε backup ανεβαίνει και στο {host}, bucket {bucket}, φάκελος {prefix}. Εκεί κρατιούνται τα {keep} πιο πρόσφατα.',
+  'Last upload': 'Τελευταίο ανέβασμα',
+  'Last upload failed': 'Το τελευταίο ανέβασμα απέτυχε',
+  'It is retried every 30 minutes.': 'Ξαναδοκιμάζεται κάθε 30 λεπτά.',
+  'Test connection': 'Δοκιμή σύνδεσης',
+  'Upload now': 'Ανέβασμα τώρα',
+  'Show cloud copies': 'Εμφάνιση αντιγράφων cloud',
+  'Hide cloud copies': 'Απόκρυψη αντιγράφων cloud',
+  'Loading…': 'Φόρτωση…',
+  'No copies in the cloud yet.': 'Δεν υπάρχουν ακόμα αντίγραφα στο cloud.',
+  'Cloud storage works ({ms} ms)': 'Το cloud storage λειτουργεί ({ms} ms)',
+  'Uploaded to the cloud: {n}': 'Ανέβηκαν στο cloud: {n}',
+  'The cloud already has the newest backup': 'Το cloud έχει ήδη το πιο πρόσφατο backup',
+  'For a copy outside this PC, choose a OneDrive, Google Drive or Dropbox folder as the backup folder above: every backup is then copied to the cloud by that program.':
+    'Για αντίγραφο εκτός του υπολογιστή, διαλέξτε παραπάνω ως φάκελο backup έναν φάκελο OneDrive, Google Drive ή Dropbox: κάθε backup θα ανεβαίνει αυτόματα στο cloud από εκείνο το πρόγραμμα.',
+  'Not set up. On the server run: sudo ims offsite (cloud storage such as Backblaze B2, Cloudflare R2, AWS S3 or Wasabi). See the installation guide.':
+    'Δεν έχει ρυθμιστεί. Στον server εκτελέστε: sudo ims offsite (cloud storage όπως Backblaze B2, Cloudflare R2, AWS S3 ή Wasabi). Δείτε τον οδηγό εγκατάστασης.',
+  'The copy is downloaded from the cloud storage first.': 'Το αντίγραφο θα κατέβει πρώτα από το cloud.',
+  'Before update': 'Πριν από ενημέρωση',
+  'Before database upgrade': 'Πριν από αναβάθμιση βάσης',
+  'Cloud backup is not configured on this server': 'Το backup στο cloud δεν έχει ρυθμιστεί σε αυτόν τον server',
+  'This copy is not in the cloud storage': 'Αυτό το αντίγραφο δεν υπάρχει στο cloud',
+  'This copy is encrypted: set BACKUP_PASSPHRASE on the server first': 'Το αντίγραφο είναι κρυπτογραφημένο: ορίστε πρώτα το BACKUP_PASSPHRASE στον server',
+  'Wrong BACKUP_PASSPHRASE: this copy cannot be decrypted': 'Λάθος BACKUP_PASSPHRASE: το αντίγραφο δεν αποκρυπτογραφείται',
+
+  // Updates
+  Updates: 'Ενημερώσεις',
+  'Version {v}': 'Έκδοση {v}',
+  'Check for updates now': 'Έλεγχος για ενημέρωση τώρα',
+  'The server will check for a new version in a few seconds.': 'Ο server θα ελέγξει για νέα έκδοση σε λίγα δευτερόλεπτα.',
+  'Server updates are automatic: every night at {time}, with a backup first and an automatic return to the previous version if the new one does not start.':
+    'Οι ενημερώσεις του server γίνονται αυτόματα: κάθε βράδυ στις {time}, με backup πρώτα και αυτόματη επιστροφή στην προηγούμενη έκδοση αν η νέα δεν ξεκινήσει.',
+  'Automatic server updates are off. Use "Check for updates now" or run sudo ims update on the server.':
+    'Οι αυτόματες ενημερώσεις του server είναι κλειστές. Πατήστε «Έλεγχος για ενημέρωση τώρα» ή εκτελέστε sudo ims update στον server.',
+  'Updating… The app restarts and reconnects by itself in about a minute.': 'Γίνεται ενημέρωση… Η εφαρμογή επανεκκινείται και ξανασυνδέεται μόνη της σε περίπου ένα λεπτό.',
+  'Checking for a new version…': 'Έλεγχος για νέα έκδοση…',
+  'The last update did not start correctly, so the server returned to version {v} by itself. Your data was not affected.':
+    'Η τελευταία ενημέρωση δεν ξεκίνησε σωστά, οπότε ο server επέστρεψε μόνος του στην έκδοση {v}. Τα δεδομένα σας δεν επηρεάστηκαν.',
+  'The last update could not be completed.': 'Η τελευταία ενημέρωση δεν ολοκληρώθηκε.',
+  'Version {v} is available.': 'Υπάρχει η έκδοση {v}.',
+  'This is the newest version.': 'Έχετε την πιο πρόσφατη έκδοση.',
+  'Last check: {when}.': 'Τελευταίος έλεγχος: {when}.',
+  'Update done': 'Ενημερώθηκε',
+  'Returned to previous': 'Επιστροφή στην προηγούμενη',
+  'This PC runs its own copy of the app; it is updated with the Windows app below.':
+    'Αυτός ο υπολογιστής έχει δικό του αντίγραφο της εφαρμογής· ενημερώνεται μαζί με την εφαρμογή Windows παρακάτω.',
+  'This server was not installed with the installer, so it is updated by hand (see the installation guide).':
+    'Αυτός ο server δεν εγκαταστάθηκε με τον installer, οπότε ενημερώνεται χειροκίνητα (δείτε τον οδηγό εγκατάστασης).',
+  'Free disk space: {free} of {total}': 'Ελεύθερος χώρος δίσκου: {free} από {total}',
+  'low: delete old files or enlarge the disk': 'λίγος: διαγράψτε παλιά αρχεία ή μεγαλώστε τον δίσκο',
+  'Windows app on this PC': 'Εφαρμογή Windows σε αυτόν τον υπολογιστή',
+  'Version {v} is ready. It is installed when the app closes, or now:': 'Η έκδοση {v} είναι έτοιμη. Θα εγκατασταθεί όταν κλείσει η εφαρμογή, ή τώρα:',
+  'Restart and update': 'Επανεκκίνηση και ενημέρωση',
+  'Downloading version {v}… {p}%': 'Λήψη έκδοσης {v}… {p}%',
+  'Could not check for updates: {m}. The app tries again later.': 'Δεν έγινε έλεγχος για ενημερώσεις: {m}. Η εφαρμογή θα ξαναδοκιμάσει αργότερα.',
+  'Automatic updates are off in this copy of the app.': 'Οι αυτόματες ενημερώσεις είναι κλειστές σε αυτό το αντίγραφο της εφαρμογής.',
+  'Updates itself automatically.': 'Ενημερώνεται αυτόματα.',
+  'Check now': 'Έλεγχος τώρα',
+  'Change server…': 'Αλλαγή server…',
+  'Connect to a company server…': 'Σύνδεση σε server εταιρείας…',
+  'Updates of this installation are not managed by the server tool': 'Οι ενημερώσεις αυτής της εγκατάστασης δεν γίνονται από το εργαλείο του server',
 };
