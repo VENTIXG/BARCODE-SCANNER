@@ -71,25 +71,28 @@ first saves the current data, so it can be undone.
 - On Linux/macOS the same command works without Wine (see `desktop/scripts/build-win.cjs`).
 - Try the desktop app without building an installer: `npm run desktop`.
 
-## Server mode (production on a server or several PCs)
+## Server mode (several PCs, one database)
+
+One server runs the app; every PC uses it from its browser. Changes appear on all
+open screens immediately. Installation with Docker and HTTPS, backups, updates and
+rollback: **[deploy/DEPLOY.md](deploy/DEPLOY.md)** (in Greek).
 
 ```bash
-npm install
-npm run build        # builds client (client/dist) and server (server/dist)
-cp .env.example .env # set JWT_SECRET, COOKIE_SECURE=true behind HTTPS, …
-npm start            # one process serves the API and the web app on PORT (default 4000)
+cp .env.example .env     # DOMAIN, JWT_SECRET, ADMIN_PASSWORD
+docker compose up -d --build
+deploy/update.sh v1.2.0  # later: update (copies the database first, rolls back on failure)
 ```
-
-Data lives in `DATA_DIR` (default `server/data/`): `inventory.db` (SQLite) and
-`uploads/` (product photos). Back up that folder — e.g. with
-`sqlite3 inventory.db ".backup backup.db"` while the app is running.
 
 ## Tests
 
 ```bash
-npm test             # API integration tests (vitest + supertest, throw-away database)
+npm test             # 37 unit / API tests (real SQLite database, real HTTP)
+npm run e2e          # two PCs (two browsers) against one real server, incl. server restart
 npm run typecheck
 ```
+
+CI (`.github/workflows/ci.yml`) runs all of the above on every push. The Windows installer
+is built by `.github/workflows/windows-installer.yml`.
 
 ---
 

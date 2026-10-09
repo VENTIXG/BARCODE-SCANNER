@@ -36,6 +36,10 @@ wait_healthy() {
 }
 
 backup_database() {
+  if ! dc ps --status running --services 2>/dev/null | grep -qx app; then
+    echo "The app is not running. Start it first (docker compose up -d) so the database can be copied." >&2
+    return 1
+  fi
   local name="inventory_$(date -u +%Y-%m-%d_%H%M%S)_before-update.db"
   in_app "
     const fs=require('fs'),D=require('better-sqlite3');
@@ -43,7 +47,7 @@ backup_database() {
     const db=new D('/data/inventory.db',{readonly:true,fileMustExist:true});
     db.exec(\"VACUUM INTO '/data/backups/$name'\");
     db.close();
-    console.log('/data/backups/$name');" >/dev/null
+    console.log('/data/backups/$name');" >/dev/null || return 1
   echo "$name" > "$BACKUP_NAME_FILE"
   echo "$name"
 }
@@ -99,7 +103,7 @@ git fetch --quiet --tags origin || true
 git rev-parse --verify --quiet "$TARGET" >/dev/null || git rev-parse --verify --quiet "origin/$TARGET" >/dev/null || { echo "Unknown version: $TARGET" >&2; exit 1; }
 
 log "2/4 Backing up the database"
-BACKUP="$(backup_database)"
+BACKUP="$(backup_database)" || { echo "Backup failed. The update was not started." >&2; exit 1; }
 echo "Copy saved as $BACKUP (in the ims-data volume, backups folder)."
 
 log "3/4 Building and starting $TARGET"

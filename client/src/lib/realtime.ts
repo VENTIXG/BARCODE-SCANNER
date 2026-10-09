@@ -28,7 +28,7 @@ export function useLiveStatus(): LiveStatus {
  * The browser reconnects by itself; after a reconnect everything is refreshed,
  * because changes made while disconnected were not delivered.
  */
-export function useRealtime(queryClient: QueryClient) {
+export function useRealtime(queryClient: QueryClient, onNewVersion?: (version: string) => void) {
   useEffect(() => {
     if (typeof EventSource === 'undefined') {
       setStatus('offline');
@@ -36,6 +36,20 @@ export function useRealtime(queryClient: QueryClient) {
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     let wasDown = false;
+    // The version this page was loaded with; after a server update it differs.
+    let loadedVersion: string | null = null;
+    const checkVersion = async () => {
+      try {
+        const r = await fetch('/api/health', { cache: 'no-store' });
+        const { version } = (await r.json()) as { version?: string };
+        if (!version) return;
+        if (loadedVersion === null) loadedVersion = version;
+        else if (version !== loadedVersion) onNewVersion?.(version);
+      } catch {
+        /* checked again on the next reconnect */
+      }
+    };
+    void checkVersion();
     const refresh = () => {
       clearTimeout(timer);
       timer = setTimeout(() => void queryClient.invalidateQueries(), 250);
@@ -47,6 +61,7 @@ export function useRealtime(queryClient: QueryClient) {
       if (wasDown) {
         wasDown = false;
         refresh();
+        void checkVersion();
       }
     };
     es.onerror = () => {
@@ -58,5 +73,5 @@ export function useRealtime(queryClient: QueryClient) {
       clearTimeout(timer);
       es.close();
     };
-  }, [queryClient]);
+  }, [queryClient, onNewVersion]);
 }

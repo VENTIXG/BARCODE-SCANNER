@@ -8,11 +8,11 @@ services:
     build: .
     image: warehouse-ims:${IMS_TAG:-local}
     restart: unless-stopped
-    env_file: .env
     environment:
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (a long random string)}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env for the first start}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_HOURS: ${SESSION_HOURS:-12}
       REQUIRE_ADMIN_PASSWORD: "true"
     volumes:
       - ims-data:/data

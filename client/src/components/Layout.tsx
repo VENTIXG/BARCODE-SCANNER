@@ -325,7 +325,12 @@ export function Layout() {
   const override = useScanOverride();
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  useRealtime(queryClient);
+  useRealtime(queryClient, (version) =>
+    toast.info(t('A new version ({v}) is available. Reload to use it.', { v: version }), {
+      duration: Number.POSITIVE_INFINITY,
+      action: { label: t('Reload'), onClick: () => window.location.reload() },
+    }),
+  );
   const live = useLiveStatus();
 
   // A scan made while no field has focus: pages may take it over (scanner,

@@ -717,4 +717,6 @@ export const el: Record<string, string> = {
   'Size is required': 'Το μέγεθος είναι υποχρεωτικό',
   'Size {size} is listed more than once': 'Το μέγεθος {size} αναφέρεται δύο φορές',
   'Size {size} is listed twice': 'Το μέγεθος {size} αναφέρεται δύο φορές',
+  'A new version ({v}) is available. Reload to use it.': 'Υπάρχει νέα έκδοση ({v}). Ανανεώστε τη σελίδα για να τη χρησιμοποιήσετε.',
+  Reload: 'Ανανέωση',
 };
