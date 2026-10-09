@@ -7,6 +7,8 @@ import { actorOf, clearSession, issueSession, requireAuth, type AuthUser } from 
 import { audit } from '../lib/audit.js';
 import { HttpError, badRequest } from '../lib/errors.js';
 import { PERMISSIONS, can, type Permission } from '../lib/permissions.js';
+import { config } from '../config.js';
+
 
 export const authRouter = Router();
 

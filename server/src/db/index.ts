@@ -84,12 +84,22 @@ function ensureBaseData(db: DB, quiet = false) {
     const users = db.prepare('SELECT COUNT(*) FROM users').pluck().get() as number;
     if (users === 0) {
       const password = process.env.ADMIN_PASSWORD ?? 'admin123';
+      if (config.requireAdminPassword && (!process.env.ADMIN_PASSWORD || password === 'admin123' || password.length < 12)) {
+        throw new Error(
+          'First start needs ADMIN_PASSWORD (at least 12 characters, not the default). Set it in the environment and start again.',
+        );
+      }
       // A first admin with the well-known default password must change it after signing in.
       db.prepare(
         `INSERT INTO users (username, full_name, password_hash, role, must_change_password) VALUES ('admin', 'Administrator', ?, 'ADMIN', ?)`,
       ).run(bcrypt.hashSync(password, 10), password === 'admin123' ? 1 : 0);
+      // Never print the password: logs are often shared or kept.
       if (!quiet && !process.env.VITEST)
-        console.log(`[setup] Created initial admin user: admin / ${password} — change this password after first login.`);
+        console.log(
+          password === 'admin123'
+            ? "[setup] Created initial admin user 'admin' with the default password. Change it after the first login."
+            : "[setup] Created initial admin user 'admin' with the password from ADMIN_PASSWORD.",
+        );
     }
   })();
 }

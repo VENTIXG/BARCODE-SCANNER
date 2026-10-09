@@ -1,0 +1,14 @@
+.git
+**/node_modules
+**/dist
+**/data
+**/*.db
+**/*.db-wal
+**/*.db-shm
+desktop
+e2e
+release
+*.log
+.env
+.env.*
+!.env.example

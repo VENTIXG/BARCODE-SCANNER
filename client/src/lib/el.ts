@@ -699,4 +699,22 @@ export const el: Record<string, string> = {
   'Changes from other PCs appear automatically': 'Οι αλλαγές από άλλους υπολογιστές εμφανίζονται αυτόματα',
   'Connection lost. Check the network and try again.': 'Η σύνδεση χάθηκε. Ελέγξτε το δίκτυο και δοκιμάστε ξανά.',
   'This request key was already used for another action': 'Το ίδιο αίτημα έχει ήδη χρησιμοποιηθεί για άλλη ενέργεια',
+  // Sizes / variants
+  Sizes: 'Μεγέθη',
+  'Add sizes': 'Προσθήκη μεγεθών',
+  'Add sizes to {name}': 'Προσθήκη μεγεθών στο «{name}»',
+  'Each size has its own SKU, barcode, stock and history': 'Κάθε μέγεθος έχει δικό του SKU, barcode, απόθεμα και ιστορικό',
+  'Base product': 'Βασικό προϊόν',
+  open: 'άνοιγμα',
+  'Separate with commas, e.g. S, M, L, XL': 'Χωρισμένα με κόμμα, π.χ. S, M, L, XL',
+  'Opening stock': 'Αρχικό απόθεμα',
+  'Remove size': 'Αφαίρεση μεγέθους',
+  'Create sizes': 'Δημιουργία μεγεθών',
+  'Sizes added: {n}': 'Προστέθηκαν {n} μεγέθη',
+  'This product has sizes with their own stock history. Set it to Inactive, or delete the sizes first.':
+    'Το προϊόν έχει μεγέθη με δικό τους ιστορικό. Ορίστε το ως Ανενεργό ή διαγράψτε πρώτα τα μεγέθη.',
+  'Sizes can only be added to a base product, not to a size': 'Μεγέθη προστίθενται μόνο σε βασικό προϊόν, όχι σε μέγεθος',
+  'Size is required': 'Το μέγεθος είναι υποχρεωτικό',
+  'Size {size} is listed more than once': 'Το μέγεθος {size} αναφέρεται δύο φορές',
+  'Size {size} is listed twice': 'Το μέγεθος {size} αναφέρεται δύο φορές',
 };

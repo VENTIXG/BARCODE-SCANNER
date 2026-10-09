@@ -5,8 +5,9 @@ import cookieParser from 'cookie-parser';
 import compression from 'compression';
 import { publish, subscribe } from './lib/events.js';
 import helmet from 'helmet';
-import { config } from './config.js';
+import { appVersion, config } from './config.js';
 import { requireAuth, requirePermission } from './middleware/auth.js';
+import { getDb } from './db/index.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { auditRouter } from './routes/audit.js';
 import { authRouter } from './routes/auth.js';
@@ -50,7 +51,11 @@ export function createApp() {
   app.use(cookieParser());
 
   const api = express.Router();
-  api.get('/health', (_req, res) => res.json({ ok: true }));
+  api.get('/health', (_req, res) => {
+    // Public and cheap: used by Docker, the update script and open browsers to detect a new version.
+    getDb().prepare('SELECT 1').get();
+    res.json({ ok: true, version: appVersion });
+  });
   api.use('/auth', authRouter);
 
   // Tell open browsers which resource changed after each successful write.

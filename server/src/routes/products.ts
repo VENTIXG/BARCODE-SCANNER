@@ -20,6 +20,7 @@ import {
   type ProductRow,
 } from '../lib/products.js';
 import { applyStockChange, setProductLocation } from '../lib/stock.js';
+import { idempotencyKeySchema, runIdempotent } from '../lib/idempotency.js';
 
 export const productsRouter = Router();
 
@@ -100,6 +101,9 @@ productsRouter.get('/:id', (req, res) => {
   const id = idParam(req.params.id);
   const p = getProduct(db, id);
   if (!p) throw notFound('Product not found');
+  const variants = (db.prepare('SELECT id FROM products WHERE parent_id = ? ORDER BY id').pluck().all(id) as number[]).map(
+    (vid) => serializeProduct(getProduct(db, vid)!),
+  );
   const stats = db
     .prepare(
       `SELECT
@@ -114,7 +118,7 @@ productsRouter.get('/:id', (req, res) => {
   const duplicates = p.barcode
     ? db.prepare('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?').all(p.barcode, id)
     : [];
-  res.json({ data: serializeProduct(p), stats, barcodeDuplicates: duplicates });
+  res.json({ data: serializeProduct(p), stats, barcodeDuplicates: duplicates, variants });
 });
 
 productsRouter.get('/:id/transactions', (req, res) => {
@@ -301,6 +305,12 @@ productsRouter.delete('/:id', requirePermission('products.delete'), (req, res) =
     db.prepare('SELECT 1 FROM stock_receipt_items WHERE product_id = ? LIMIT 1').get(id) ||
     db.prepare('SELECT 1 FROM stock_dispatch_items WHERE product_id = ? LIMIT 1').get(id) ||
     db.prepare(`SELECT 1 FROM inventory_transactions WHERE product_id = ? AND type <> 'INITIAL_STOCK' LIMIT 1`).get(id);
+  const sizes = db.prepare('SELECT COUNT(*) FROM products WHERE parent_id = ?').pluck().get(id) as number;
+  if (sizes)
+    throw conflict(
+      `This product has ${sizes} sizes with their own stock history. Set it to Inactive, or delete the sizes first.`,
+      'PRODUCT_HAS_VARIANTS',
+    );
   if (used)
     throw conflict(
       'This product has stock movements and cannot be deleted without losing history. Set it to Inactive instead.',
@@ -318,6 +328,101 @@ productsRouter.delete('/:id', requirePermission('products.delete'), (req, res) =
   })();
   if (p.image_path) fs.rm(path.join(config.uploadsDir, p.image_path), { force: true }, () => {});
   res.status(204).end();
+});
+
+// ---- Sizes / variants --------------------------------------------------------
+
+const variantBody = z.object({
+  idempotencyKey: idempotencyKeySchema,
+  variants: z
+    .array(
+      z.object({
+        size: z.string().trim().min(1, 'Size is required').max(20),
+        sku: code.min(1, 'SKU is required'),
+        barcode: code.nullish().transform((v) => (v ? v : null)),
+        minStock: z.number().min(0).default(0),
+        initialQuantity: z.number().min(0).default(0),
+      }),
+    )
+    .min(1)
+    .max(40),
+});
+
+/**
+ * Add sizes to a product. Each size becomes a product of its own: its SKU and
+ * barcode are scanned and counted separately, and its history is separate.
+ * Category, supplier, prices and location are copied from the base product.
+ */
+productsRouter.post('/:id/variants', requirePermission('products.manage'), (req, res) => {
+  const db = getDb();
+  const actor = actorOf(req);
+  const parentId = idParam(req.params.id);
+  const body = variantBody.parse(req.body);
+  const warehouseId = getDefaultWarehouseId(db);
+  const out = runIdempotent(db, actor, body.idempotencyKey, `variants:${parentId}`, () => {
+    const parent = getProduct(db, parentId);
+    if (!parent) throw notFound('Product not found');
+    if (parent.parent_id) throw badRequest('Sizes can only be added to a base product, not to a size');
+    const seen = new Set<string>();
+    for (const v of body.variants) {
+      const key = v.size.toLowerCase();
+      if (seen.has(key)) throw badRequest(`Size ${v.size} is listed more than once`);
+      seen.add(key);
+    }
+    const createdIds: number[] = db.transaction(() =>
+      body.variants.map((v) => {
+        assertCodesAvailable(db, { sku: v.sku, barcode: v.barcode });
+        const info = db
+          .prepare(
+            `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
+               purchase_price, selling_price, status, created_by, parent_id, size)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            v.sku,
+            v.barcode,
+            `${parent.name} ${v.size}`,
+            parent.description,
+            parent.category_id,
+            parent.supplier_id,
+            parent.unit,
+            v.minStock,
+            parent.purchase_price,
+            parent.selling_price,
+            parent.status,
+            actor.id,
+            parentId,
+            v.size,
+          );
+        const id = Number(info.lastInsertRowid);
+        setProductLocation(db, id, warehouseId, parent.location_id);
+        if (v.initialQuantity > 0)
+          applyStockChange(db, actor, {
+            productId: id,
+            warehouseId,
+            type: 'INITIAL_STOCK',
+            quantity: v.initialQuantity,
+            notes: `Opening stock for size ${v.size}`,
+            sourceType: 'PRODUCT',
+            sourceId: id,
+          });
+        return id;
+      }),
+    )();
+    audit(db, actor, {
+      action: 'PRODUCT.VARIANTS',
+      entityType: 'product',
+      entityId: parentId,
+      productId: parentId,
+      description: `${actor.username} added sizes ${body.variants.map((v) => v.size).join(', ')} to ${parent.sku}.`,
+      newValue: { sizes: body.variants.map((v) => ({ size: v.size, sku: v.sku })) },
+    });
+    return {
+      status: 201,
+      body: { data: createdIds.map((id) => serializeProduct(getProduct(db, id)!)) },
+    };
+  });
+  res.status(out.status).json(out.body);
 });
 
 // ---- Product image -------------------------------------------------------

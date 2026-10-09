@@ -165,6 +165,7 @@ export default function Products() {
                         <Link to={`/products/${p.id}`} onClick={(e) => e.stopPropagation()} className="max-w-[260px] truncate font-medium text-fg hover:underline">
                           {p.name}
                         </Link>
+                        {p.size && <span className="rounded-md bg-brand-soft px-1.5 text-xs font-semibold text-brand-fg">{p.size}</span>}
                       </div>
                     </Td>
                     <Td className="font-mono text-xs whitespace-nowrap">{p.sku}</Td>

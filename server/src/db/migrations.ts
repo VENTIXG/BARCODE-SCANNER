@@ -289,4 +289,15 @@ export const migrations: Migration[] = [
     CREATE INDEX ix_idempotency_created ON idempotency_keys(created_at);
     `,
   },
+  {
+    version: 4,
+    name: 'product_variants',
+    sql: /* sql */ `
+    -- A size (or other variant) is its own product with its own SKU, barcode,
+    -- stock and history. parent_id links it to the base product.
+    ALTER TABLE products ADD COLUMN parent_id INTEGER REFERENCES products(id) ON DELETE CASCADE;
+    ALTER TABLE products ADD COLUMN size TEXT;
+    CREATE INDEX ix_products_parent ON products(parent_id);
+    `,
+  },
 ];

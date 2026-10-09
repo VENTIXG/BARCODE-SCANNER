@@ -47,6 +47,8 @@ export interface Product {
   imageUrl: string | null;
   status: 'ACTIVE' | 'INACTIVE';
   stockStatus: StockStatus;
+  parentId: number | null;
+  size: string | null;
   createdAt: string;
   updatedAt: string;
 }

@@ -24,6 +24,15 @@ function resolveJwtSecret(): string {
   return secret;
 }
 
+/** Version from server/package.json (bumped together with the root package.json). */
+export const appVersion: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'), 'utf8')).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+
 export const config = {
   env: process.env.NODE_ENV ?? 'development',
   isProduction: process.env.NODE_ENV === 'production',
@@ -38,4 +47,6 @@ export const config = {
   /** Number of reverse proxies in front of the app (for correct client IPs). */
   trustProxy: Number(process.env.TRUST_PROXY ?? 0),
   clientDist: path.resolve(serverRoot, '..', 'client', 'dist'),
+  /** Server deployments: refuse to create the first admin with a default password. */
+  requireAdminPassword: process.env.REQUIRE_ADMIN_PASSWORD === 'true',
 };

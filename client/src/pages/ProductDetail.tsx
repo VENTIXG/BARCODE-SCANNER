@@ -11,9 +11,10 @@ import { useT } from '../lib/i18n';
 import { errMsg } from '../lib/queries';
 import type { Product, Transaction } from '../lib/types';
 import { AdjustStockModal } from '../components/AdjustStockModal';
+import { AddSizesModal } from '../components/AddSizesModal';
 import { TooltipBox, axisProps, useChartColors } from '../components/charts';
 import { TxTable } from '../components/TxTable';
-import { Badge, Button, Card, CardHeader, ConfirmDialog, EmptyState, LoadingBlock, PageHeader, Pagination, ProductThumb, StatusBadge, StockBadge } from '../components/ui';
+import { Badge, Button, Card, CardHeader, ConfirmDialog, EmptyState, LoadingBlock, PageHeader, Pagination, ProductThumb, StatusBadge, StockBadge, Table, Td, Th } from '../components/ui';
 
 interface Stats {
   totalIn: number;
@@ -41,12 +42,14 @@ export default function ProductDetail() {
   const colors = useChartColors();
   const [page, setPage] = useState(1);
   const [adjust, setAdjust] = useState(false);
+  const [sizes, setSizes] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const product = useQuery({
     queryKey: ['product', id],
-    queryFn: () => api.get<{ data: Product; stats: Stats; barcodeDuplicates: { id: number; sku: string; name: string }[] }>(`/products/${id}`),
+    queryFn: () =>
+      api.get<{ data: Product; stats: Stats; barcodeDuplicates: { id: number; sku: string; name: string }[]; variants: Product[] }>(`/products/${id}`),
   });
   const history = useQuery({
     queryKey: ['product-tx', id, page],
@@ -102,6 +105,9 @@ export default function ProductDetail() {
         }
         actions={
           <>
+            {!p.parentId && can('products.manage') && (
+              <Button onClick={() => setSizes(true)}>{t('Add sizes')}</Button>
+            )}
             {can('stock.adjust') && (
               <Button icon={<SlidersHorizontal className="size-4" />} onClick={() => setAdjust(true)}>
                 {t('Adjust stock')}
@@ -118,6 +124,15 @@ export default function ProductDetail() {
           </>
         }
       />
+
+      {p.parentId && (
+        <div className="mb-4 rounded-lg bg-brand-soft px-3 py-2 text-sm text-brand-fg">
+          {t('Size')}: <b>{p.size}</b> · {t('Base product')}:{' '}
+          <Link to={`/products/${p.parentId}`} className="font-medium underline">
+            {t('open')}
+          </Link>
+        </div>
+      )}
 
       {product.data.barcodeDuplicates.length > 0 && (
         <div className="mb-4 rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-sm text-warn">
@@ -237,6 +252,36 @@ export default function ProductDetail() {
         </Card>
       )}
 
+      {product.data.variants.length > 0 && (
+        <Card className="mt-4">
+          <CardHeader title={t('Sizes')} subtitle={t('Each size has its own SKU, barcode, stock and history')} />
+          <Table>
+            <thead>
+              <tr>
+                <Th>{t('Size')}</Th>
+                <Th>SKU</Th>
+                <Th>{t('Barcode')}</Th>
+                <Th align="right">{t('Stock')}</Th>
+                <Th>{t('Status')}</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {product.data.variants.map((v) => (
+                <tr key={v.id} className="hover:bg-surface-2">
+                  <Td className="font-semibold">
+                    <Link to={`/products/${v.id}`} className="hover:underline">{v.size}</Link>
+                  </Td>
+                  <Td className="font-mono text-xs">{v.sku}</Td>
+                  <Td className="font-mono text-xs text-muted">{v.barcode ?? '—'}</Td>
+                  <Td align="right" className="tabular font-semibold">{fmtQty(v.quantity)}</Td>
+                  <Td><StockBadge status={v.stockStatus} /></Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </Card>
+      )}
+
       <Card className="mt-4">
         <CardHeader title={t('Stock history')} subtitle={t('Full audit trail of every stock movement')} actions={<Badge>{history.data?.total ?? 0}</Badge>} />
         {!history.data?.data.length ? (
@@ -250,6 +295,7 @@ export default function ProductDetail() {
       </Card>
 
       <AdjustStockModal product={p} open={adjust} onClose={() => setAdjust(false)} />
+      <AddSizesModal product={p} open={sizes} onClose={() => setSizes(false)} />
       <ConfirmDialog
         open={confirmDelete}
         title={t('Delete product?')}

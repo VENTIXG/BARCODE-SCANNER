@@ -7,7 +7,7 @@ export type StockStatus = 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
 export const PRODUCT_SELECT = /* sql */ `
   SELECT p.id, p.sku, p.barcode, p.name, p.description, p.category_id, p.supplier_id, p.unit,
          p.min_stock, p.purchase_price, p.selling_price, p.image_path, p.status,
-         p.created_at, p.updated_at,
+         p.created_at, p.updated_at, p.parent_id, p.size,
          c.name AS category_name, s.name AS supplier_name,
          COALESCE(i.quantity, 0) AS quantity,
          i.location_id, l.code AS location_code,
@@ -37,6 +37,8 @@ export interface ProductRow {
   status: 'ACTIVE' | 'INACTIVE';
   created_at: string;
   updated_at: string;
+  parent_id: number | null;
+  size: string | null;
   category_name: string | null;
   supplier_name: string | null;
   quantity: number;
@@ -68,6 +70,8 @@ export function serializeProduct(p: ProductRow) {
     stockStatus: p.stock_status,
     createdAt: p.created_at,
     updatedAt: p.updated_at,
+    parentId: p.parent_id,
+    size: p.size,
   };
 }
 export type ProductDTO = ReturnType<typeof serializeProduct>;
