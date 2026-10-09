@@ -9,80 +9,21 @@
  *
  *   npm run e2e
  */
-import { spawn } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chromium } from 'playwright';
+import { apiLogin as apiLoginAt, launchBrowser, log, testServer, uiLogin as uiLoginAt, until } from './lib.mjs';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const PORT = Number(process.env.E2E_PORT ?? 4711);
-const BASE = `http://127.0.0.1:${PORT}`;
-const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'ims-e2e-'));
+const srv = testServer(Number(process.env.E2E_PORT ?? 4711));
+const BASE = srv.base;
 const SKU = `E2E-${Date.now().toString(36).toUpperCase()}`;
 const BARCODE = `5209${String(Date.now()).slice(-9)}`.slice(0, 13);
 
-let server = null;
 let browser;
-const log = (...a) => console.log('[e2e]', ...a);
-
-function startServer() {
-  const child = spawn(process.execPath, ['server/dist/index.js'], {
-    cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', DATA_DIR: DATA, NODE_ENV: 'production' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stderr.on('data', (d) => process.env.E2E_VERBOSE && process.stderr.write(d));
-  return child;
-}
-
-async function waitForHealth(timeoutMs = 20000) {
-  const until = Date.now() + timeoutMs;
-  while (Date.now() < until) {
-    try {
-      if ((await fetch(`${BASE}/api/health`)).ok) return;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  throw new Error('server did not start');
-}
-
-async function apiLogin(username, password) {
-  const res = await fetch(`${BASE}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
-  });
-  assert.equal(res.status, 200, `API login ${username}`);
-  return res.headers.get('set-cookie').split(';')[0];
-}
-
-/** Poll until fn() returns true or the timeout passes. */
-async function until(fn, label, timeoutMs = 8000) {
-  const end = Date.now() + timeoutMs;
-  let last;
-  while (Date.now() < end) {
-    last = await fn().catch(() => undefined);
-    if (last === true) return;
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error(`timed out waiting for: ${label} (last value: ${JSON.stringify(last)})`);
-}
+const apiLogin = (u, p) => apiLoginAt(BASE, u, p);
+const uiLogin = (page, u, p) => uiLoginAt(page, BASE, u, p);
 
 /** The big stock number on the product page. */
 const stockOn = (page) => page.locator('span.text-4xl').first().textContent().then((t) => t.trim());
-
-async function uiLogin(page, username, password) {
-  await page.goto(`${BASE}/login`);
-  await page.fill('input[autocomplete=username]', username);
-  await page.fill('input[type=password]', password);
-  await page.click('button[type=submit]');
-  await page.waitForURL(`${BASE}/`);
-}
 
 async function scan(page, code) {
   const input = page.locator('input[placeholder^="Σκανάρετε barcode"]');
@@ -96,8 +37,7 @@ let pcA1, pcA2, pcB1, pcB2;
 let ctxA, ctxB;
 
 before(async () => {
-  server = startServer();
-  await waitForHealth();
+  await srv.start();
   cookieAdmin = await apiLogin('admin', 'admin123');
   const h = { 'Content-Type': 'application/json', Cookie: cookieAdmin };
   for (const u of [
@@ -114,7 +54,7 @@ before(async () => {
   });
   assert.equal(p.status, 201);
   productId = (await p.json()).data.id;
-  browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM || undefined });
+  browser = await launchBrowser();
   // Two PCs; each PC has two windows (same browser profile).
   ctxA = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   ctxB = await browser.newContext({ viewport: { width: 1280, height: 860 } });
@@ -127,13 +67,12 @@ before(async () => {
   // Both PCs sign in through their own window; pcA2/pcB2 share the session cookie.
   await pcA2.goto(`${BASE}/scanner`);
   await pcB2.goto(`${BASE}/scanner`);
-  log('setup done', { SKU, BARCODE, productId, DATA });
+  log('setup done', { SKU, BARCODE, productId, data: srv.data });
 });
 
 after(async () => {
   await browser?.close();
-  server?.kill('SIGTERM');
-  fs.rmSync(DATA, { recursive: true, force: true });
+  srv.cleanup();
 });
 
 describe('two PCs, one server, one database', () => {
@@ -201,12 +140,11 @@ describe('two PCs, one server, one database', () => {
     await pcA1.goto(`${BASE}/products/${productId}`);
     await until(async () => (await pcA1.getByRole('status').textContent()).includes('Ζωντανά'), 'status Live');
 
-    server.kill('SIGTERM');
+    srv.stop();
     await until(async () => /Επανασύνδεση|Εκτός σύνδεσης/.test(await pcA1.getByRole('status').textContent()), 'status shows reconnecting', 15000);
     log('server stopped: window shows reconnecting');
 
-    server = startServer();
-    await waitForHealth();
+    await srv.start();
     await until(async () => (await pcA1.getByRole('status').textContent()).includes('Ζωντανά'), 'status Live again', 30000);
     log('server back: window is live again');
   });

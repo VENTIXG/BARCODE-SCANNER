@@ -1,6 +1,7 @@
 import {
   forwardRef,
   useEffect,
+  useLayoutEffect,
   useRef,
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
@@ -448,21 +449,37 @@ export function Modal({
 }) {
   const t = useT();
   const panel = useRef<HTMLDivElement>(null);
+  // Callers usually pass a new onClose function on every render. Keeping it in a ref means
+  // the effect below runs only when the dialog opens or closes, not on every keystroke
+  // (it used to move the cursor back to the first field after each letter).
+  const onCloseRef = useRef(onClose);
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+  });
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // Only the top-most dialog closes.
+      const dialogs = document.querySelectorAll('[role=dialog]');
+      if (dialogs[dialogs.length - 1] === panel.current) onCloseRef.current();
+    };
     window.addEventListener('keydown', onKey);
     const prev = document.activeElement as HTMLElement | null;
-    // Focus the first field in the dialog.
-    setTimeout(() => {
-      const first = panel.current?.querySelector<HTMLElement>('[data-autofocus], input:not([type=hidden]):not([disabled]), select, textarea');
+    // Focus the first field, unless a field inside the dialog already has the focus (autoFocus).
+    const timer = setTimeout(() => {
+      if (!panel.current || panel.current.contains(document.activeElement)) return;
+      const first =
+        panel.current.querySelector<HTMLElement>('[data-autofocus]') ??
+        panel.current.querySelector<HTMLElement>('input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled])');
       first?.focus();
     }, 20);
     return () => {
+      clearTimeout(timer);
       window.removeEventListener('keydown', onKey);
       prev?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
   if (!open) return null;
   const widths = { sm: 'max-w-sm', md: 'max-w-lg', lg: 'max-w-2xl', xl: 'max-w-4xl' };
   return createPortal(

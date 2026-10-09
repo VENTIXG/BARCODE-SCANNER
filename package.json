@@ -16,7 +16,7 @@
     "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
     "desktop": "npm ci --prefix desktop && npm run start --prefix desktop",
     "desktop:win": "npm ci --prefix desktop && npm run dist:win --prefix desktop",
-    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs"
+    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs e2e/forms.e2e.mjs"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
