@@ -11,6 +11,7 @@ import { audit } from '../lib/audit.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { escapeLike, idParam, num, optText, pagination, str } from '../lib/http.js';
 import { nextDocumentNumber, peekDocumentNumber } from '../lib/numbering.js';
+import { idempotencyKeySchema, runIdempotent } from '../lib/idempotency.js';
 import {
   InsufficientStockError,
   applyStockChange,
@@ -31,6 +32,7 @@ const itemSchema = z.object({
 });
 
 const receiptBody = z.object({
+  idempotencyKey: idempotencyKeySchema,
   supplierId: z.number().int().positive().nullish(),
   invoiceNumber: optText(100),
   date: dateStr,
@@ -40,6 +42,7 @@ const receiptBody = z.object({
 });
 
 const dispatchBody = z.object({
+  idempotencyKey: idempotencyKeySchema,
   customerName: optText(200),
   reference: optText(100),
   date: dateStr,
@@ -168,7 +171,8 @@ export function makeDocumentRouter(kind: Kind) {
     const warehouseId = getDefaultWarehouseId(db);
     const body = kind === 'receipt' ? receiptBody.parse(req.body) : dispatchBody.parse(req.body);
 
-    const id = db.transaction(() => {
+    const out = runIdempotent(db, actor, body.idempotencyKey, kind, () => {
+      const id = db.transaction(() => {
       // Validate products (and stock for dispatches) before writing anything.
       const totals = new Map<number, number>();
       for (const it of body.items) totals.set(it.productId, round3((totals.get(it.productId) ?? 0) + it.quantity));
@@ -266,9 +270,10 @@ export function makeDocumentRouter(kind: Kind) {
         newValue: { number, items: body.items.length, totalQuantity: totalQty },
       });
       return docId;
-    })();
-
-    res.status(201).json({ data: loadDocument(kind, id) });
+      })();
+      return { status: 201, body: { data: loadDocument(kind, id) } };
+    });
+    res.status(out.status).json(out.body);
   });
 
   /** Cancel a confirmed document: every posted transaction is reversed. */

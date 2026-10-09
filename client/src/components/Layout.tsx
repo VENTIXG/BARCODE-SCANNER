@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useLiveStatus, useRealtime } from '../lib/realtime';
 import clsx from 'clsx';
 import {
   AlertTriangle,
@@ -37,6 +38,7 @@ import type { Product } from '../lib/types';
 import { fmtQty } from '../lib/format';
 import { Kbd, ProductThumb, StockBadge } from './ui';
 import { useScanOverride } from './ScanContext';
+import { ErrorBoundary } from './ErrorBoundary';
 
 interface NavItem {
   to: string;
@@ -322,6 +324,9 @@ export function Layout() {
   const location = useLocation();
   const override = useScanOverride();
   const { user } = useAuth();
+  const queryClient = useQueryClient();
+  useRealtime(queryClient);
+  const live = useLiveStatus();
 
   // A scan made while no field has focus: pages may take it over (scanner,
   // stock in/out); otherwise open the product.
@@ -353,6 +358,26 @@ export function Layout() {
           </button>
           <GlobalSearch />
           <div className="ml-auto flex items-center gap-1">
+            <span
+              className="hidden items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium text-fg-2 md:flex"
+              role="status"
+              aria-live="polite"
+              title={t('Changes from other PCs appear automatically')}
+            >
+              <span
+                className={clsx(
+                  'size-2 rounded-full',
+                  live === 'live' ? 'bg-ok' : live === 'offline' ? 'bg-bad' : 'bg-warn animate-pulse',
+                )}
+              />
+              {live === 'live'
+                ? t('Live')
+                : live === 'offline'
+                  ? t('Offline')
+                  : live === 'reconnecting'
+                    ? t('Reconnecting…')
+                    : t('Connecting…')}
+            </span>
             <button onClick={() => navigate('/scanner')} className="hidden items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-fg-2 hover:bg-surface-3 hover:text-fg sm:flex" title={t('Barcode Scanner')}>
               <ScanBarcode className="size-4" />
               <span className="hidden xl:inline">{t('Scan')}</span>
@@ -373,7 +398,9 @@ export function Layout() {
               </button>
             </div>
           )}
-          <Outlet />
+          <ErrorBoundary resetKey={location.pathname}>
+            <Outlet />
+          </ErrorBoundary>
         </main>
       </div>
     </div>

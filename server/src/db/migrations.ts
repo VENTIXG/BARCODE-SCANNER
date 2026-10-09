@@ -2,7 +2,13 @@
  * Database schema, applied as ordered migrations.
  * Each migration runs once; the applied version is tracked in `schema_migrations`.
  */
-export const migrations: { version: number; name: string; sql: string }[] = [
+export interface Migration {
+  version: number;
+  name: string;
+  sql: string;
+}
+
+export const migrations: Migration[] = [
   {
     version: 1,
     name: 'initial_schema',
@@ -264,6 +270,23 @@ export const migrations: { version: number; name: string; sql: string }[] = [
     name: 'users_must_change_password',
     sql: /* sql */ `
     ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1));
+    `,
+  },
+  {
+    version: 3,
+    name: 'idempotency_keys',
+    sql: /* sql */ `
+    -- A client-generated key makes a write safe to retry: the first result is
+    -- stored with the key and replayed instead of posting the movement again.
+    CREATE TABLE idempotency_keys (
+      key         TEXT    PRIMARY KEY,
+      user_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      scope       TEXT    NOT NULL,
+      status      INTEGER NOT NULL,
+      response    TEXT    NOT NULL,
+      created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+    CREATE INDEX ix_idempotency_created ON idempotency_keys(created_at);
     `,
   },
 ];

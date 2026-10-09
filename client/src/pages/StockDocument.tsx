@@ -9,7 +9,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import clsx from 'clsx';
 import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Download, Minus, Plus, Printer, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { ApiError, api, download, type Page } from '../lib/api';
+import { ApiError, api, download, newIdempotencyKey, type Page } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtDate, fmtMoney, fmtQty, todayLocal } from '../lib/format';
 import { useT } from '../lib/i18n';
@@ -210,9 +210,12 @@ function Editor({ kind }: { kind: Kind }) {
   const invalidLines = draft.lines.filter((l) => !(parseQty(l.quantity) > 0) || (l.unitPrice !== '' && !(parseQty(l.unitPrice) >= 0)));
   const canConfirm = draft.lines.length > 0 && invalidLines.length === 0 && Boolean(draft.date);
 
+  // Same key until the document is saved: a retry or a second click cannot post it twice.
+  const [idemKey, setIdemKey] = useState(newIdempotencyKey);
   const submit = useMutation({
     mutationFn: (force: boolean) =>
       api.post<{ data: StockDocument }>(`/${isIn ? 'receipts' : 'dispatches'}`, {
+        idempotencyKey: idemKey,
         date: draft.date,
         notes: draft.notes || null,
         ...(isIn
@@ -223,8 +226,9 @@ function Editor({ kind }: { kind: Kind }) {
           quantity: parseQty(l.quantity),
           unitPrice: l.unitPrice === '' ? null : parseQty(l.unitPrice),
         })),
-      }),
+      }, { retries: 2 }),
     onSuccess: (res) => {
+      setIdemKey(newIdempotencyKey());
       setConfirm(false);
       setDone(res.data);
       setDraft(emptyDraft());

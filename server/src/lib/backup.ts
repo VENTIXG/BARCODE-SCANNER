@@ -18,7 +18,7 @@ import { closeDb, getDb, getSetting, nowIso, type DB } from '../db/index.js';
 import { badRequest } from './errors.js';
 
 /** inventory_2026-10-03_183005.db, optionally with a label: inventory_2026-10-03_183005_manual.db */
-export const BACKUP_FILE_RE = /^inventory_\d{4}-\d{2}-\d{2}_\d{6}(?:_[a-z-]+)?\.db$/;
+export const BACKUP_FILE_RE = /^inventory_\d{4}-\d{2}-\d{2}_\d{6}(?:_[a-z0-9-]+)?\.db$/;
 
 const DEFAULT_KEEP = 30;
 const DAY_MS = 24 * 3600 * 1000;
@@ -41,6 +41,10 @@ export function checkWritableDir(dir: string): string | null {
   } catch {
     return `The folder ${dir} cannot be created or is not writable`;
   }
+}
+
+export function stampedName(label?: string, d = new Date()) {
+  return `inventory_${stamp(d)}${label ? `_${label}` : ''}.db`;
 }
 
 function stamp(d = new Date()) {

@@ -7,6 +7,7 @@ import { HttpError, badRequest, notFound } from '../lib/errors.js';
 import { optText } from '../lib/http.js';
 import { getProduct, lookupByCode, serializeProduct } from '../lib/products.js';
 import { adjustToCount, applyStockChange, getQuantity, round3 } from '../lib/stock.js';
+import { idempotencyKeySchema, runIdempotent } from '../lib/idempotency.js';
 
 export const stockRouter = Router();
 
@@ -22,6 +23,7 @@ const scanBody = z
     quantity: positiveQty.default(1),
     reference: optText(100),
     notes: optText(500),
+    idempotencyKey: idempotencyKeySchema,
   })
   .refine((b) => b.code || b.productId, 'code or productId is required');
 
@@ -33,31 +35,35 @@ const scanBody = z
 stockRouter.post('/scan', requirePermission('stock.scan'), (req, res) => {
   const db = getDb();
   const body = scanBody.parse(req.body);
-  let productId = body.productId;
-  if (!productId) {
-    const matches = lookupByCode(db, body.code!);
-    if (matches.length === 0)
-      throw new HttpError(404, `No product found for code "${body.code}"`, 'PRODUCT_NOT_FOUND', { code: body.code });
-    if (matches.length > 1)
-      throw new HttpError(409, 'Several products share this barcode — choose one', 'MULTIPLE_MATCHES', {
-        products: matches.map(serializeProduct),
-      });
-    productId = matches[0].id;
-  }
-  const product = getProduct(db, productId);
-  if (!product) throw notFound('Product not found');
-  if (product.status === 'INACTIVE' && body.mode === 'IN')
-    throw badRequest(`Product ${product.sku} is inactive. Activate it before receiving stock.`, 'PRODUCT_INACTIVE');
+  const actor = actorOf(req);
+  const out = runIdempotent(db, actor, body.idempotencyKey, 'scan', () => {
+    let productId = body.productId;
+    if (!productId) {
+      const matches = lookupByCode(db, body.code!);
+      if (matches.length === 0)
+        throw new HttpError(404, `No product found for code "${body.code}"`, 'PRODUCT_NOT_FOUND', { code: body.code });
+      if (matches.length > 1)
+        throw new HttpError(409, 'Several products share this barcode — choose one', 'MULTIPLE_MATCHES', {
+          products: matches.map(serializeProduct),
+        });
+      productId = matches[0].id;
+    }
+    const product = getProduct(db, productId);
+    if (!product) throw notFound('Product not found');
+    if (product.status === 'INACTIVE' && body.mode === 'IN')
+      throw badRequest(`Product ${product.sku} is inactive. Activate it before receiving stock.`, 'PRODUCT_INACTIVE');
 
-  const tx = applyStockChange(db, actorOf(req), {
-    productId,
-    type: body.mode === 'IN' ? 'STOCK_IN' : 'STOCK_OUT',
-    quantity: body.quantity,
-    reference: body.reference,
-    notes: body.notes ?? 'Barcode scan',
-    sourceType: 'SCAN',
+    const tx = applyStockChange(db, actor, {
+      productId,
+      type: body.mode === 'IN' ? 'STOCK_IN' : 'STOCK_OUT',
+      quantity: body.quantity,
+      reference: body.reference,
+      notes: body.notes ?? 'Barcode scan',
+      sourceType: 'SCAN',
+    });
+    return { status: 201, body: { data: { product: serializeProduct(getProduct(db, productId)!), transaction: tx } } };
   });
-  res.status(201).json({ data: { product: serializeProduct(getProduct(db, productId)!), transaction: tx } });
+  res.status(out.status).json(out.body);
 });
 
 // ---- Manual movements & adjustments ------------------------------------
@@ -69,6 +75,7 @@ const adjustBody = z.discriminatedUnion('mode', [
     countedQuantity: z.number().min(0),
     reason: z.string().trim().min(1, 'Reason is required').max(500),
     reference: optText(100),
+    idempotencyKey: idempotencyKeySchema,
   }),
   z.object({
     mode: z.enum(['ADJUSTMENT_PLUS', 'ADJUSTMENT_MINUS', 'RETURN_IN', 'RETURN_OUT']),
@@ -76,6 +83,7 @@ const adjustBody = z.discriminatedUnion('mode', [
     quantity: positiveQty,
     reason: z.string().trim().min(1, 'Reason is required').max(500),
     reference: optText(100),
+    idempotencyKey: idempotencyKeySchema,
   }),
 ]);
 
@@ -83,33 +91,37 @@ stockRouter.post('/adjust', requirePermission('stock.adjust'), (req, res) => {
   const db = getDb();
   const body = adjustBody.parse(req.body);
   const actor = actorOf(req);
-  let tx;
-  if (body.mode === 'count') {
-    tx = adjustToCount(db, actor, {
-      productId: body.productId,
-      countedQuantity: body.countedQuantity,
-      reason: body.reason,
-      reference: body.reference,
-    });
-  } else {
-    tx = applyStockChange(db, actor, {
-      productId: body.productId,
-      type: body.mode,
-      quantity: body.quantity,
-      notes: body.reason,
-      reference: body.reference,
-      sourceType: 'ADJUSTMENT',
-    });
-  }
-  const product = getProduct(db, body.productId);
-  if (!product) throw notFound('Product not found');
-  res.json({ data: { product: serializeProduct(product), transaction: tx ?? null } });
+  const out = runIdempotent(db, actor, body.idempotencyKey, 'adjust', () => {
+    let tx;
+    if (body.mode === 'count') {
+      tx = adjustToCount(db, actor, {
+        productId: body.productId,
+        countedQuantity: body.countedQuantity,
+        reason: body.reason,
+        reference: body.reference,
+      });
+    } else {
+      tx = applyStockChange(db, actor, {
+        productId: body.productId,
+        type: body.mode,
+        quantity: body.quantity,
+        notes: body.reason,
+        reference: body.reference,
+        sourceType: 'ADJUSTMENT',
+      });
+    }
+    const product = getProduct(db, body.productId);
+    if (!product) throw notFound('Product not found');
+    return { status: 200, body: { data: { product: serializeProduct(product), transaction: tx ?? null } } };
+  });
+  res.status(out.status).json(out.body);
 });
 
 /** Stock take: submit counted quantities for many products at once. */
 const countBody = z.object({
   reason: z.string().trim().min(1).max(500),
   reference: optText(100),
+  idempotencyKey: idempotencyKeySchema,
   items: z
     .array(z.object({ productId: z.number().int().positive(), countedQuantity: z.number().min(0) }))
     .min(1)
@@ -120,7 +132,7 @@ stockRouter.post('/count', requirePermission('stock.adjust'), (req, res) => {
   const db = getDb();
   const body = countBody.parse(req.body);
   const actor = actorOf(req);
-  const result = db.transaction(() => {
+  const out = runIdempotent(db, actor, body.idempotencyKey, 'count', () => {
     let adjusted = 0;
     let unchanged = 0;
     let netChange = 0;
@@ -138,7 +150,7 @@ stockRouter.post('/count', requirePermission('stock.adjust'), (req, res) => {
       description: `${actor.username} completed a stock count of ${body.items.length} products (${adjusted} adjusted, ${unchanged} unchanged)${body.reference ? `, ref ${body.reference}` : ''}.`,
       newValue: { adjusted, unchanged, netChange: round3(netChange) },
     });
-    return { adjusted, unchanged, netChange: round3(netChange) };
-  })();
-  res.json({ data: result });
+    return { status: 200, body: { data: { adjusted, unchanged, netChange: round3(netChange) } } };
+  });
+  res.status(out.status).json(out.body);
 });

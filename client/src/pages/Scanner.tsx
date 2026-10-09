@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { ArrowDownToLine, ArrowUpFromLine, CheckCircle2, MapPin, Plus, Search, Trash2, Undo2, Volume2, VolumeX, XCircle } from 'lucide-react';
-import { ApiError, api } from '../lib/api';
+import { ApiError, api, newIdempotencyKey } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtQty, fmtTime } from '../lib/format';
 import { useT } from '../lib/i18n';
@@ -94,11 +94,12 @@ export default function Scanner() {
   const post = useCallback(
     async (body: { code?: string; productId?: number; quantity: number }) => {
       try {
-        const res = await api.post<{ data: { product: Product; transaction: Transaction } }>('/stock/scan', {
-          ...body,
-          mode,
-          reference: reference || null,
-        });
+        // One key per scan: a network retry sends the same key, so the movement is posted once.
+        const res = await api.post<{ data: { product: Product; transaction: Transaction } }>(
+          '/stock/scan',
+          { ...body, mode, reference: reference || null, idempotencyKey: newIdempotencyKey() },
+          { retries: 2 },
+        );
         const { product, transaction } = res.data;
         beep(product.stockStatus === 'IN_STOCK' || mode === 'IN' ? 'ok' : 'warn');
         show({ status: 'ok', product, tx: transaction });

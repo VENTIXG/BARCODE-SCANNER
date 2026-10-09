@@ -80,8 +80,9 @@ export default function ProductForm() {
   const [quick, setQuick] = useState<'categories' | 'suppliers' | null>(null);
   const [dupConfirm, setDupConfirm] = useState<{ products: { sku: string; name: string }[] } | null>(null);
 
+  // Own cache key: ['product', id] holds the detail-page shape ({ data, stats, ... }).
   const existing = useQuery({
-    queryKey: ['product', id],
+    queryKey: ['product-form', id],
     queryFn: () => api.get<{ data: Product }>(`/products/${id}`).then((r) => r.data),
     enabled: isEdit,
   });
@@ -107,9 +108,9 @@ export default function ProductForm() {
     const p = existing.data;
     if (!p || loaded) return;
     setF({
-      sku: p.sku,
+      sku: p.sku ?? '',
       barcode: p.barcode ?? '',
-      name: p.name,
+      name: p.name ?? '',
       description: p.description ?? '',
       categoryId: p.categoryId ? String(p.categoryId) : '',
       supplierId: p.supplierId ? String(p.supplierId) : '',

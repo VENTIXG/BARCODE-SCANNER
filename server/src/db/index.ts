@@ -1,7 +1,10 @@
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import { config } from '../config.js';
-import { migrations } from './migrations.js';
+import { migrations, type Migration } from './migrations.js';
+import { defaultBackupDir, stampedName } from '../lib/backup.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export type DB = Database.Database;
 
@@ -21,27 +24,43 @@ export const DEFAULT_SETTINGS: Record<string, string> = {
   last_backup_at: '',
 };
 
-export function openDatabase(file: string = config.dbFile, opts: { quiet?: boolean } = {}): DB {
+export function openDatabase(file: string = config.dbFile, opts: { quiet?: boolean; backupDir?: string | null } = {}): DB {
   const db = new Database(file);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
   db.pragma('synchronous = NORMAL');
   db.function('ims_norm', { deterministic: true }, (v: unknown) => (v == null ? null : normalizeText(String(v))));
-  migrate(db);
+  migrate(db, migrations, opts.backupDir === undefined ? defaultBackupDir() : opts.backupDir);
   ensureBaseData(db, opts.quiet);
   return db;
 }
 
-function migrate(db: DB) {
+/**
+ * Apply pending migrations in order, each in its own transaction.
+ * When an existing database is about to be upgraded, a copy is saved first
+ * (VACUUM INTO), so a failed upgrade can always be undone from that copy.
+ */
+export function migrate(db: DB, list: Migration[] = migrations, backupDir: string | null = defaultBackupDir()) {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY, name TEXT NOT NULL,
     applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))`);
   const applied = new Set(
     db.prepare('SELECT version FROM schema_migrations').pluck().all() as number[],
   );
-  for (const m of migrations) {
-    if (applied.has(m.version)) continue;
+  const pending = list.filter((m) => !applied.has(m.version)).sort((a, b) => a.version - b.version);
+  if (!pending.length) return;
+
+  // Only an upgrade of an existing database needs a copy; a brand-new one has no data.
+  const isUpgrade = applied.size > 0;
+  if (isUpgrade && backupDir) {
+    fs.mkdirSync(backupDir, { recursive: true });
+    const file = path.join(backupDir, stampedName(`before-migrate-v${pending[0].version}`));
+    db.exec(`VACUUM INTO '${file.replace(/'/g, "''")}'`);
+    console.log(`[migrate] Saved a copy before upgrading: ${file}`);
+  }
+
+  for (const m of pending) {
     db.transaction(() => {
       db.exec(m.sql);
       db.prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)').run(m.version, m.name);

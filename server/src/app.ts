@@ -3,6 +3,7 @@ import path from 'node:path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import compression from 'compression';
+import { publish, subscribe } from './lib/events.js';
 import helmet from 'helmet';
 import { config } from './config.js';
 import { requireAuth, requirePermission } from './middleware/auth.js';
@@ -43,7 +44,8 @@ export function createApp() {
       crossOriginEmbedderPolicy: false,
     }),
   );
-  app.use(compression());
+  // Server-Sent Events must not be buffered by compression.
+  app.use(compression({ filter: (req, res) => req.path !== '/api/events' && compression.filter(req, res) }));
   app.use(express.json({ limit: '30mb' }));
   app.use(cookieParser());
 
@@ -51,8 +53,37 @@ export function createApp() {
   api.get('/health', (_req, res) => res.json({ ok: true }));
   api.use('/auth', authRouter);
 
+  // Tell open browsers which resource changed after each successful write.
+  api.use((req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD') return next();
+    // Read the resource name now: req.path changes while the router is handling the request.
+    const scope = req.path.split('/').filter(Boolean)[0] ?? 'misc';
+    res.on('finish', () => {
+      if (res.statusCode < 400) publish(scope);
+    });
+    next();
+  });
+
   // Everything below requires a signed-in user.
   api.use(requireAuth);
+
+  api.get('/events', (req, res) => {
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    res.flushHeaders();
+    res.write('retry: 2000\n\n');
+    const send = (e: { scope: string; at: string }) => res.write(`event: change\ndata: ${JSON.stringify(e)}\n\n`);
+    const unsubscribe = subscribe(send);
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), 20_000);
+    req.on('close', () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    });
+  });
   api.use('/dashboard', requirePermission('dashboard.view'), dashboardRouter);
   api.use('/search', requirePermission('products.view'), searchRouter);
   api.use('/products', requirePermission('products.view'), productsRouter);

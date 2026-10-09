@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { toast } from 'sonner';
-import { api } from '../lib/api';
+import { api, newIdempotencyKey } from '../lib/api';
 import { fmtQty, fmtSigned } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { errMsg } from '../lib/queries';
@@ -28,6 +28,7 @@ export function AdjustStockModal({ product, open, onClose }: { product: Product;
   const [reason, setReason] = useState(REASONS.count[0]);
   const [custom, setCustom] = useState('');
   const [reference, setReference] = useState('');
+  const [idemKey, setIdemKey] = useState(newIdempotencyKey);
 
   useEffect(() => {
     if (open) {
@@ -50,10 +51,12 @@ export function AdjustStockModal({ product, open, onClose }: { product: Product;
       api.post<{ data: { product: Product; transaction: Transaction | null } }>(
         '/stock/adjust',
         mode === 'count'
-          ? { mode, productId: product.id, countedQuantity: n, reason: finalReason, reference: reference || null }
-          : { mode, productId: product.id, quantity: n, reason: finalReason, reference: reference || null },
+          ? { mode, productId: product.id, countedQuantity: n, reason: finalReason, reference: reference || null, idempotencyKey: idemKey }
+          : { mode, productId: product.id, quantity: n, reason: finalReason, reference: reference || null, idempotencyKey: idemKey },
+        { retries: 2 },
       ),
     onSuccess: (res) => {
+      setIdemKey(newIdempotencyKey());
       if (!res.data.transaction) toast.info(t('Counted quantity equals system quantity — no adjustment needed.'));
       else toast.success(t('Stock of {sku} updated to {qty}', { sku: product.sku, qty: fmtQty(res.data.product.quantity) }));
       void qc.invalidateQueries();

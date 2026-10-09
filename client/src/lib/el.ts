@@ -691,4 +691,12 @@ export const el: Record<string, string> = {
   'Demo data can only be loaded into an empty database': 'Τα demo δεδομένα φορτώνονται μόνο σε άδεια βάση',
   'The new password must be different from the current one': 'Ο νέος κωδικός πρέπει να διαφέρει από τον τρέχοντα',
   'Before demo data (empty)': 'Πριν τα demo δεδομένα (άδεια βάση)',
+  // Live updates & reliability
+  Live: 'Ζωντανά',
+  Offline: 'Εκτός σύνδεσης',
+  'Reconnecting…': 'Επανασύνδεση…',
+  'Connecting…': 'Σύνδεση…',
+  'Changes from other PCs appear automatically': 'Οι αλλαγές από άλλους υπολογιστές εμφανίζονται αυτόματα',
+  'Connection lost. Check the network and try again.': 'Η σύνδεση χάθηκε. Ελέγξτε το δίκτυο και δοκιμάστε ξανά.',
+  'This request key was already used for another action': 'Το ίδιο αίτημα έχει ήδη χρησιμοποιηθεί για άλλη ενέργεια',
 };

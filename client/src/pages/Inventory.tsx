@@ -4,7 +4,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import clsx from 'clsx';
 import { ClipboardCheck, Download, MapPin, Pencil, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
-import { api, download, type Page } from '../lib/api';
+import { api, download, newIdempotencyKey, type Page } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { fmtMoney, fmtNumber, fmtQty, fmtSigned } from '../lib/format';
 import { useT } from '../lib/i18n';
@@ -177,6 +177,7 @@ interface CountLine {
 function CountTab() {
   const t = useT();
   const qc = useQueryClient();
+  const [idemKey, setIdemKey] = useState(newIdempotencyKey);
   const picker = useRef<ProductPickerHandle>(null);
   const inputs = useRef<Record<number, HTMLInputElement | null>>({});
   const [lines, setLines] = useState<CountLine[]>(() => {
@@ -229,13 +230,19 @@ function CountTab() {
 
   const submit = useMutation({
     mutationFn: () =>
-      api.post<{ data: { adjusted: number; unchanged: number; netChange: number } }>('/stock/count', {
-        reason: t(reason),
-        reference: reference || null,
-        items: counted.map((l) => ({ productId: l.product.id, countedQuantity: Number(l.counted.replace(',', '.')) })),
-      }),
+      api.post<{ data: { adjusted: number; unchanged: number; netChange: number } }>(
+        '/stock/count',
+        {
+          reason: t(reason),
+          reference: reference || null,
+          idempotencyKey: idemKey,
+          items: counted.map((l) => ({ productId: l.product.id, countedQuantity: Number(l.counted.replace(',', '.')) })),
+        },
+        { retries: 2 },
+      ),
     onSuccess: (r) => {
       toast.success(t('Stock count saved: {a} adjusted, {u} unchanged', { a: r.data.adjusted, u: r.data.unchanged }));
+      setIdemKey(newIdempotencyKey());
       setLines([]);
       setConfirm(false);
       void qc.invalidateQueries();
