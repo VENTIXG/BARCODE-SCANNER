@@ -23,7 +23,18 @@ Write-Host "== Install 0.0.1 silently"
 Start-Process -FilePath 'release-old/Warehouse-IMS-Setup.exe' -ArgumentList '/S' -Wait
 $installed = Get-Installed
 if (-not $installed -or $installed.DisplayVersion -ne '0.0.1') { throw "0.0.1 is not installed: $($installed | Out-String)" }
-$exe = Join-Path $installed.InstallLocation 'Warehouse IMS.exe'
+$installed | Format-List DisplayName, DisplayVersion, InstallLocation, DisplayIcon, UninstallString | Out-String | Write-Host
+# The program: from InstallLocation, else from the icon path, else search the per-user programs folder.
+$exe = $null
+if ($installed.InstallLocation) { $exe = Join-Path $installed.InstallLocation 'Warehouse IMS.exe' }
+if (-not $exe -or -not (Test-Path $exe)) {
+  $icon = ("$($installed.DisplayIcon)" -replace ',\d+$', '') -replace '"', ''
+  if ($icon -and (Test-Path $icon)) { $exe = $icon }
+}
+if (-not $exe -or -not (Test-Path $exe)) {
+  $exe = (Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Programs') -Recurse -Filter 'Warehouse IMS.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+}
+if (-not $exe -or -not (Test-Path $exe)) { throw 'The installed program was not found' }
 Write-Host "Installed 0.0.1 at $exe"
 
 Write-Host "== Serve $version on http://127.0.0.1:8765/"

@@ -20,7 +20,9 @@
 set -Eeuo pipefail
 umask 022
 
-IMS_HOME="${IMS_HOME:-/opt/warehouse-ims}"
+# The installation folder is where this script lives (/usr/local/bin/ims is a link to it), so
+# systemd jobs and admins work on the right installation without any setting.
+IMS_HOME="${IMS_HOME:-$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)}"
 ENV_FILE="$IMS_HOME/.env"
 STATE_DIR="$IMS_HOME/state"
 REQUEST_DIR="$IMS_HOME/requests"
@@ -73,8 +75,11 @@ releases_url() { env_get IMS_RELEASES_URL "$DEFAULT_RELEASES_URL"; }
 
 # ---- Docker -------------------------------------------------------------------------------
 
+# Compose project: warehouse-ims, unless .env (or the environment) names another one.
+project() { printf '%s' "${COMPOSE_PROJECT_NAME:-$(env_get COMPOSE_PROJECT_NAME warehouse-ims)}"; }
+
 # stdin from /dev/null: docker must never read input meant for someone else (e.g. curl | bash).
-dc() { docker compose --project-directory "$IMS_HOME" --env-file "$ENV_FILE" "$@" </dev/null; }
+dc() { docker compose -p "$(project)" --project-directory "$IMS_HOME" --env-file "$ENV_FILE" "$@" </dev/null; }
 app_id() { dc ps -q app 2>/dev/null || true; }
 app_running() { [[ -n "$(dc ps -q --status running app 2>/dev/null || true)" ]]; }
 
@@ -291,10 +296,12 @@ install_files() { # VERSION
 install_units() {
   has_systemd || return 0
   [[ -d "$IMS_HOME/systemd" ]] || return 0
-  local f time
+  local f time tz
   time="$(env_get IMS_UPDATE_TIME 03:30)"
+  tz="$(env_get TZ Europe/Athens)"
+  [[ -f "/usr/share/zoneinfo/$tz" ]] || tz=""
   for f in "$IMS_HOME"/systemd/*; do
-    sed -e "s|@IMS_HOME@|$IMS_HOME|g" -e "s|@UPDATE_TIME@|$time|g" "$f" >"/etc/systemd/system/$(basename "$f")"
+    sed -e "s|@IMS_HOME@|$IMS_HOME|g" -e "s|@UPDATE_TIME@|$time|g" -e "s| *@TZ@|${tz:+ $tz}|g" "$f" >"/etc/systemd/system/$(basename "$f")"
   done
   systemctl daemon-reload
   systemctl enable --now ims-update.timer ims-watchdog.timer ims-request.path >/dev/null 2>&1 || warn "Δεν ενεργοποιήθηκαν οι χρονοδιακόπτες systemd"

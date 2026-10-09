@@ -2,7 +2,8 @@
 Description=Warehouse IMS: nightly check for updates
 
 [Timer]
-OnCalendar=*-*-* @UPDATE_TIME@:00
+# Local time of the business (TZ in .env), whatever the server clock is set to.
+OnCalendar=*-*-* @UPDATE_TIME@:00 @TZ@
 RandomizedDelaySec=15min
 Persistent=true
 

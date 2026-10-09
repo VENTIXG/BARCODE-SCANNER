@@ -69,7 +69,8 @@ curl -fsSL https://github.com/ventixg/barcode-scanner/releases/latest/download/i
 
 Τι κάνει ο εγκαταστάτης: Docker, την εφαρμογή, HTTPS (Caddy + Let's Encrypt), daily backup, νυχτερινές ενημερώσεις
 (03:30), έλεγχο λειτουργίας ανά 5 λεπτά, ενημερώσεις ασφαλείας Ubuntu (με επανεκκίνηση στις 04:30 μόνο όταν χρειάζεται),
-swap σε μικρούς servers και άνοιγμα των θυρών 80/443 αν το `ufw` είναι ενεργό.
+ώρα Ελλάδας στον server (για άλλη ζώνη: `TZ=Europe/Nicosia` πριν από το `bash`), swap σε μικρούς servers και άνοιγμα των
+θυρών 80/443 αν το `ufw` είναι ενεργό.
 
 ## Βήμα 4: Πρώτη σύνδεση
 

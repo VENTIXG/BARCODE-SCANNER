@@ -157,7 +157,7 @@ main() {
       echo "IMS_AUTO_UPDATE='true'"
       echo "IMS_UPDATE_TIME='${IMS_UPDATE_TIME:-03:30}'"
       # Optional settings (tests, or ports already taken by another program).
-      for key in IMS_RELEASES_URL HTTP_PORT HTTPS_PORT IMS_TLS; do
+      for key in IMS_RELEASES_URL HTTP_PORT HTTPS_PORT IMS_TLS COMPOSE_PROJECT_NAME; do
         if [[ -n "${!key:-}" ]]; then echo "$key='${!key}'"; fi
       done
     } >"$ENV_FILE"
@@ -221,6 +221,14 @@ main() {
   fi
 
   # ---- Operating system: security updates, swap, firewall ------------------------------------
+
+  if [[ "${IMS_NO_OS_SETUP:-0}" != 1 ]] && command -v timedatectl >/dev/null; then
+    # Server clock in the business's time zone: nightly jobs then really run at night.
+    tz="$(env_get TZ)"
+    if [[ -n "$tz" && -f "/usr/share/zoneinfo/$tz" ]] && timedatectl set-timezone "$tz" 2>/dev/null; then
+      say "Ζώνη ώρας του server: $tz"
+    fi
+  fi
 
   if [[ "${IMS_NO_OS_SETUP:-0}" != 1 ]] && command -v apt-get >/dev/null; then
     say "Αυτόματες ενημερώσεις ασφαλείας του λειτουργικού…"

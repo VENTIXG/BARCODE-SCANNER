@@ -5,4 +5,5 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+Environment=IMS_HOME=@IMS_HOME@
 ExecStart=@IMS_HOME@/ims watchdog

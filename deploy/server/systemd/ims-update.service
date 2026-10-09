@@ -6,5 +6,6 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+Environment=IMS_HOME=@IMS_HOME@
 ExecStart=@IMS_HOME@/ims update --auto
 TimeoutStartSec=45min
