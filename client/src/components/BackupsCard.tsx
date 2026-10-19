@@ -178,7 +178,7 @@ export function BackupsCard() {
           <input
             ref={fileInput}
             type="file"
-            accept=".db,.sqlite"
+            accept=".gz,.db,.sqlite"
             hidden
             onChange={(e) => {
               const f = e.target.files?.[0];

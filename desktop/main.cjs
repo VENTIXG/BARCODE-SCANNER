@@ -21,6 +21,9 @@ const userData = app.getPath('userData');
 const dataDir = path.join(userData, 'data');
 const configFile = path.join(userData, 'config.json');
 process.env.DATA_DIR = dataDir;
+// The built-in database (PostgreSQL inside the app, files in data\pgdata); never a server set
+// in the environment of this PC for something else.
+process.env.DATABASE_URL = '';
 process.env.NODE_ENV = 'production';
 
 // Simple log file for support: %APPDATA%\Warehouse IMS\logs\main.log
@@ -45,6 +48,9 @@ let server = null;
 let config = null;
 let shuttingDown = false;
 let shutdownDone = false;
+
+/** Data on this PC: the database of 1.3+ (pgdata) or of 1.0-1.2 (inventory.db, copied at the first start). */
+const hasLocalData = () => fs.existsSync(path.join(dataDir, 'pgdata')) || fs.existsSync(path.join(dataDir, 'inventory.db'));
 
 const importServer = (file) => import(pathToFileURL(path.join(__dirname, 'server', 'dist', file)).href);
 
@@ -254,7 +260,7 @@ function openSetup() {
     query: {
       mode: config?.mode ?? '',
       server: config?.serverUrl ?? '',
-      localData: fs.existsSync(path.join(dataDir, 'inventory.db')) ? '1' : '',
+      localData: hasLocalData() ? '1' : '',
     },
   });
 }
@@ -411,7 +417,7 @@ async function shutdown(reason) {
   if (!server) return;
   try {
     const backup = await importServer('lib/backup.js');
-    if (reason === 'before-update' || backup.backupDue()) {
+    if (reason === 'before-update' || (await backup.backupDue())) {
       const file = await backup.runBackup(reason === 'before-update' ? 'before-update' : 'auto');
       console.log(`Backup on ${reason}: ${file.name}`);
     }
@@ -443,7 +449,7 @@ async function boot() {
   config = readConfig();
   if (!config && process.env.IMS_MODE === 'local') config = { mode: 'local' };
   // Version 1.x kept its data on this PC: carry on with it without asking.
-  if (!config && fs.existsSync(path.join(dataDir, 'inventory.db'))) {
+  if (!config && hasLocalData()) {
     config = { mode: 'local' };
     writeConfig(config);
   }

@@ -20,7 +20,8 @@
     "npmRebuild": false,
     "asar": true,
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "**/node_modules/@electric-sql/pglite/dist/**"
     ],
     "win": {
       "target": [

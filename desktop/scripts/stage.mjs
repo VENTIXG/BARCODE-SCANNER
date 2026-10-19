@@ -65,4 +65,11 @@ const keep = new Set(['win32-x64.node', `${process.platform}-${process.arch}.nod
 for (const f of fs.readdirSync(prebuilds)) if (!keep.has(f)) fs.rmSync(path.join(prebuilds, f));
 for (const dir of ['deps', 'src']) fs.rmSync(path.join(app, 'node_modules', 'better-sqlite3', dir), { recursive: true, force: true });
 
+// PGlite (the built-in PostgreSQL): only the citext extension is used; source maps are not needed.
+const pglite = path.join(app, 'node_modules', '@electric-sql', 'pglite', 'dist');
+for (const f of fs.readdirSync(pglite, { recursive: true })) {
+  const file = path.join(pglite, String(f));
+  if (String(f).endsWith('.map') || (String(f).endsWith('.tar.gz') && path.basename(String(f)) !== 'citext.tar.gz')) fs.rmSync(file);
+}
+
 console.log(`Staged ${path.relative(root, app)}`);

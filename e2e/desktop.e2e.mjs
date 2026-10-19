@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { _electron as electron } from 'playwright';
@@ -120,12 +121,13 @@ describe('Windows app', () => {
     } finally {
       await quit(app);
     }
-    assert.ok(fs.existsSync(path.join(userData, 'data', 'inventory.db')), 'database in the profile folder');
-    const backups = fs.readdirSync(path.join(userData, 'data', 'backups')).filter((f) => f.endsWith('_auto.db'));
+    assert.ok(fs.existsSync(path.join(userData, 'data', 'pgdata', 'PG_VERSION')), 'database in the profile folder');
+    assert.ok(!fs.existsSync(path.join(userData, 'data', 'pgdata.lock')), 'database closed on exit');
+    const backups = fs.readdirSync(path.join(userData, 'data', 'backups')).filter((f) => f.endsWith('_auto.json.gz'));
     assert.ok(backups.length >= 1, 'backup taken on exit');
   });
 
-  it('upgrade from 1.x: existing local data opens without the start screen', async () => {
+  it('local data of this version opens without the start screen', async () => {
     fs.rmSync(configFile);
     const { app, win } = await launch();
     try {
@@ -134,5 +136,52 @@ describe('Windows app', () => {
     } finally {
       await quit(app);
     }
+  });
+
+  it('upgrade from 1.2: the SQLite database of this PC is copied at the first start', async () => {
+    // A profile of version 1.2: only data\inventory.db, no settings file.
+    const oldHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ims-desktop-12-'));
+    const oldData = path.join(oldHome, 'Warehouse IMS', 'data');
+    fs.mkdirSync(oldData, { recursive: true });
+    const { default: Database } = await import('better-sqlite3');
+    const { migrations } = await import(pathToFileURL(path.join(APP, 'server', 'dist', 'db', 'legacy', 'sqliteMigrations.js')).href);
+    const bcrypt = (await import('bcryptjs')).default;
+    const db = new Database(path.join(oldData, 'inventory.db'));
+    const norm = (v) => (v == null ? null : String(v).normalize('NFD').replace(/\p{M}+/gu, '').toLowerCase());
+    db.function('ims_norm', { deterministic: true }, norm);
+    db.exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT '')`);
+    for (const m of migrations) {
+      db.exec(m.sql);
+      db.prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)').run(m.version, m.name);
+    }
+    db.exec(`INSERT INTO warehouses (id, code, name, is_default) VALUES (1, 'MAIN', 'Main', 1);
+             INSERT INTO products (id, sku, name) VALUES (1, 'FROM-1-2', 'Προϊόν της 1.2');
+             INSERT INTO inventory (product_id, warehouse_id, quantity) VALUES (1, 1, 42);`);
+    db.prepare(`INSERT INTO users (id, username, full_name, password_hash, role) VALUES (1, 'admin', 'Admin', ?, 'ADMIN')`).run(
+      bcrypt.hashSync('password-of-1.2', 4),
+    );
+    db.close();
+
+    const { app, win } = await launch({ XDG_CONFIG_HOME: oldHome, APPDATA: oldHome });
+    try {
+      await until(async () => /^http:\/\/127\.0\.0\.1:\d+\//.test(win.url()), 'local server window without asking', 60000);
+      await win.waitForSelector('input[autocomplete=username]');
+      const products = await win.evaluate(async () => {
+        const login = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: 'password-of-1.2' }),
+        });
+        if (!login.ok) return `login ${login.status}`;
+        const res = await fetch('/api/products');
+        return (await res.json()).data.map((p) => `${p.sku}:${p.quantity}`);
+      });
+      assert.deepEqual(products, ['FROM-1-2:42']);
+    } finally {
+      await quit(app);
+    }
+    assert.ok(fs.existsSync(path.join(oldData, 'pgdata', 'PG_VERSION')), 'new database created');
+    assert.ok(fs.existsSync(path.join(oldData, 'inventory.db')), 'old database kept');
+    fs.rmSync(oldHome, { recursive: true, force: true });
   });
 });
