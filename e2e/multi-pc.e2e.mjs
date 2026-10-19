@@ -114,8 +114,8 @@ describe('two PCs, one server, one database', () => {
     await pcB1.reload();
     await until(async () => (await stockOn(pcA1)) === '95', 'A after reload');
     await until(async () => (await stockOn(pcB1)) === '95', 'B after reload');
-    const history = await pcB1.locator('tbody tr').count();
-    assert.ok(history >= 3, `history rows: ${history}`);
+    // The history is a separate request: it may arrive after the stock figure.
+    await until(async () => (await pcB1.locator('tbody tr').count()) >= 3, 'B history after reload (3 rows)');
   });
 
   it('the warehouse user cannot open user management (enforced by the server too)', async () => {
