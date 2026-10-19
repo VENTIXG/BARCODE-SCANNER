@@ -3,7 +3,8 @@
 A complete warehouse / inventory management application with barcode scanning,
 Excel import/export and a full, immutable audit trail of every stock movement.
 
-- **Backend:** Node.js 22, Express 5, SQLite (better-sqlite3, WAL mode, FTS5 search), Zod validation
+- **Backend:** Node.js 22, Express 5, PostgreSQL (servers: PostgreSQL 14+ via `DATABASE_URL`; Windows app, development
+  and tests: the built-in PGlite, PostgreSQL 18 in WebAssembly), Zod validation
 - **Frontend:** React 19, Vite, Tailwind CSS 4, TanStack Query, Recharts, SheetJS
 - **Auth:** bcrypt-hashed passwords, JWT in an `httpOnly` / `SameSite=Strict` cookie, role-based permissions
 - **UI language:** Greek (default) and English, light / dark theme, desktop-first but usable on tablets and phones
@@ -91,11 +92,13 @@ Pushes without a new version build and test everything without publishing (files
 ## Tests
 
 ```bash
-npm test                       # unit / API tests (real SQLite, real HTTP); with S3_TEST_ENDPOINT also cloud backups
+npm test                       # unit / API tests (built-in PostgreSQL, real HTTP); with S3_TEST_ENDPOINT also cloud backups
+TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres npm test   # the same on a PostgreSQL server (a database per test file)
 npm run typecheck
 npm run build && npm run e2e   # browsers: two PCs on one server (live updates, reconnect), typing in every form
 npm run stage --prefix desktop && npm run e2e:desktop   # the Electron app: start screen, server/offline/local modes
-npm run test:server-lifecycle  # Docker: install.sh, update, broken update with automatic rollback, backup/restore
+npm run test:server-lifecycle  # Docker: install.sh, update, broken update with automatic rollback, backup/restore,
+                               # update of a 1.2.0 server (SQLite) to this version and back
 ```
 
 CI runs all of them (`.github/workflows/ci.yml`); the Windows auto-update test runs in `release.yml`.
@@ -142,7 +145,10 @@ client/                 React SPA (Vite)
   src/components/       UI kit, layout, scanner input, charts
   src/lib/              API client, auth, i18n (el.ts = Greek), scanner detection, formatting
 server/
-  src/db/migrations.ts  schema (versioned migrations)
+  src/db/sql.ts         PostgreSQL access (node-postgres or PGlite, one API; nested transactions = savepoints)
+  src/db/migrations.ts  schema (versioned migrations, PostgreSQL from version 100)
+  src/db/dump.ts        backups: every table as .json.gz, restorable on any PostgreSQL
+  src/db/legacy/        reads the SQLite data of versions up to 1.2 (copied automatically at the first start)
   src/db/seed.ts        demo data
   src/lib/stock.ts      the stock ledger — the ONLY code that changes stock
   src/lib/importer.ts   Excel import validation + import
@@ -153,7 +159,8 @@ server/
 ### Stock ledger
 
 Stock is never edited directly. Every change goes through `applyStockChange()`,
-which in a single SQLite transaction:
+which in a single database transaction (write transactions run one at a time, so stock can
+never be oversold by simultaneous requests):
 
 1. reads the current quantity (`inventory` row for product + warehouse),
 2. computes the new quantity and refuses to go below zero (`409 INSUFFICIENT_STOCK`),
@@ -172,8 +179,8 @@ Transaction types: `STOCK_IN`, `STOCK_OUT`, `ADJUSTMENT_PLUS`, `ADJUSTMENT_MINUS
 | Table | Purpose |
 |---|---|
 | `users` | accounts, bcrypt hash, role, active flag, token version (instant session revocation) |
-| `products` | catalog; `sku` UNIQUE, indexes on barcode, name, category, supplier, status |
-| `products_fts` | FTS5 full-text index (maintained by triggers) for fast search over thousands of products |
+| `products` | catalog; `sku` UNIQUE (case-insensitive, `citext`), indexes on barcode, name, category, supplier, status; `search_text` (generated, lower case without accents) for Greek search |
+| `product_images` | product photos (in the database, so every PC and every backup has them) |
 | `categories`, `suppliers` | reference data |
 | `warehouses` | multi-warehouse ready (one default warehouse used by the UI today) |
 | `warehouse_locations` | `ZONE-RACK-SHELF` per warehouse, UNIQUE(warehouse, code) |

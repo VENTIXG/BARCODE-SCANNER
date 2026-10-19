@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # The whole life of a server, for real, on this machine (Docker):
 #   install.sh -> update -> a broken update rolled back automatically -> "check now" from the
-#   app -> watchdog -> backup / restore -> password reset -> manual rollback -> repair install.
+#   app -> watchdog -> backup / restore -> password reset -> manual rollback -> repair install;
+#   then a server of the published 1.2.0 (SQLite) updated to this version (PostgreSQL), rolled
+#   back to 1.2.0, used there, and updated again.
 # A local web server plays GitHub Releases; three versions are built from this checkout.
+# IMS_TEST_OLD=<version> (default 1.2.0) is downloaded from GitHub; IMS_TEST_OLD= skips that part.
 #
 #   sudo -E deploy/test/lifecycle.sh
 #
@@ -56,10 +59,9 @@ stock_of_test_product() {
   api "/products?q=LIFE-1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const p=JSON.parse(s).data.find(x=>x.sku==="LIFE-1");console.log(p?p.quantity:"missing")}catch{console.log("error")}})'
 }
 update_json() { node -e "console.log(require('$IMS_HOME/state/update.json')['$1'])"; }
-schema_now() {
-  docker compose --project-directory "$IMS_HOME" --env-file "$IMS_HOME/.env" run --rm --no-deps -T --entrypoint node app -e \
-    "const D=require('better-sqlite3');const db=new D('/data/inventory.db',{readonly:true});console.log(db.prepare('SELECT MAX(version) v FROM schema_migrations').get().v)" | tail -n1
-}
+dcl() { docker compose --project-directory "$IMS_HOME" --env-file "$IMS_HOME/.env" "$@" </dev/null; }
+schema_now() { dcl run --rm --no-deps -T app node server/dist/cli.js schema-version | tail -n1; }
+psql_val() { dcl exec -T db psql -U ims -d ims -tAc "$1"; }
 
 cleanup() {
   local code=$?
@@ -118,12 +120,15 @@ EOF
 release_from_image "$V2"
 cat >"$WORK/broken.js" <<'EOF'
 // A release that upgrades the database and then crashes on every start.
-const Database = require('better-sqlite3');
-const db = new Database('/data/inventory.db');
-db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name) VALUES (99, 'broken_release')").run();
-db.close();
-console.error('simulated failure after upgrading the database');
-process.exit(1);
+const { Client } = require('pg');
+(async () => {
+  const db = new Client({ connectionString: process.env.DATABASE_URL });
+  await db.connect();
+  await db.query("INSERT INTO schema_migrations (version, name) VALUES (999, 'broken_release') ON CONFLICT DO NOTHING");
+  await db.end();
+  console.error('simulated failure after upgrading the database');
+  process.exit(1);
+})();
 EOF
 docker build -q -t "warehouse-ims:$V3" -f - "$WORK" >/dev/null <<EOF
 FROM warehouse-ims:$V1
@@ -136,6 +141,7 @@ EOF
 release_from_image "$V3"
 # The installer must download versions $V2/$V3, not find them already loaded.
 docker rmi "warehouse-ims:$V2" "warehouse-ims:$V3" >/dev/null
+docker image inspect postgres:18 >/dev/null 2>&1 || docker pull -q postgres:18 >/dev/null
 python3 -m http.server "$WEB_PORT" --bind 127.0.0.1 --directory "$WWW" >/dev/null 2>&1 &
 WEB_PID=$!
 sleep 1
@@ -154,13 +160,17 @@ code="$(api /products -o /dev/null -w '%{http_code}' -H 'Content-Type: applicati
 check "a product with stock 42 is created" test "$code" == 201
 check "live updates (server-sent events) pass through HTTPS" bash -c "curl -sk --noproxy '*' -N --max-time 3 -b $COOKIES --resolve $DOMAIN:$HTTPS_PORT:127.0.0.1 https://$DOMAIN:$HTTPS_PORT/api/events | grep -q 'retry: 2000'"
 check "update status is shown to the admin (managed install)" bash -c "curl -sk --noproxy '*' -b $COOKIES --resolve $DOMAIN:$HTTPS_PORT:127.0.0.1 https://$DOMAIN:$HTTPS_PORT/api/system/update | grep -q '\"managed\":true'"
+check "the data is in PostgreSQL (its own container)" test "$(psql_val "SELECT quantity FROM inventory i JOIN products p ON p.id = i.product_id WHERE p.sku = 'LIFE-1'")" == 42
+check "the database has its own password" bash -c "[[ \$(grep -c '^POSTGRES_PASSWORD=..\{64\}' '$IMS_HOME/.env') == 1 ]]"
+check "the database is not reachable from outside (no published port)" test -z "$(docker port "$(dcl ps -q db)")"
+check "the database files are in postgres/" test -f "$IMS_HOME/postgres/18/docker/PG_VERSION"
 
 step "Automatic update to $V2"
 publish_latest "$V2"
 ims update --auto
 check "now running $V2" test "$(health_version)" == "$V2"
 check "the product and its stock are kept" test "$(stock_of_test_product)" == 42
-check "a database copy was taken before the update" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-update-v${V2//./-}.db'"
+check "a database copy was taken before the update" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-update-v${V2//./-}.json.gz'"
 check "status: updated" test "$(update_json lastResult)" == updated
 check "previous version recorded" test "$(env_val IMS_PREVIOUS_VERSION)" == "$V1"
 check "admin is still signed in after the update" test "$(api /auth/me -o /dev/null -w '%{http_code}')" == 200
@@ -199,7 +209,9 @@ step "Broken release $V3: upgrades the database, then never starts"
 publish_latest "$V3"
 if ims update --auto; then fail "the broken update should report failure"; fi
 check "back on $V2 automatically" test "$(health_version)" == "$V2"
-check "the database copy from before the update was restored (schema back to normal)" test "$(schema_now)" != 99
+check "the database copy from before the update was restored (schema back to normal)" test "$(schema_now)" == "$(dcl run --rm --no-deps -T app node server/dist/cli.js known-schema | tail -n1)"
+# Restoring a copy signs everyone out (the user table was replaced).
+check "admin signs in after the rollback" test "$(login admin "$ADMIN_PASSWORD")" == 200
 check "the product and its stock are intact" test "$(stock_of_test_product)" == 42
 check "the upgraded database was kept as a copy too" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-rollback'"
 check "status: rolled back" test "$(update_json lastResult)" == rolled-back
@@ -210,8 +222,8 @@ check "the next automatic check leaves $V3 alone" test "$(health_version)" == "$
 
 step "Backups: backup, restore, password reset"
 out="$(ims backup)"
-check "manual backup" bash -c "[[ '$out' == *_manual.db ]]"
-copy="$(basename "$(compgen -G "$IMS_HOME/data/backups/*before-update-v${V2//./-}.db" | head -n1)")"
+check "manual backup" bash -c "[[ '$out' == *_manual.json.gz ]]"
+copy="$(basename "$(compgen -G "$IMS_HOME/data/backups/*before-update-v${V2//./-}.json.gz" | head -n1)")"
 api /products -o /dev/null -H 'Content-Type: application/json' -d '{"sku":"LIFE-2","name":"Made after the copy","initialQuantity":1}'
 ims restore "$copy" >/dev/null
 check "the app is back after the restore" test "$(health_version)" == "$V2"
@@ -231,3 +243,57 @@ IMS_FORCE=1 ims rollback
 check "running $V1" test "$(health_version)" == "$V1"
 check "data intact after rollback" test "$(stock_of_test_product)" == 42
 check "status: rolled back" test "$(update_json lastResult)" == rolled-back
+
+OLD="${IMS_TEST_OLD-1.2.0}"
+if [[ -n "$OLD" ]]; then
+  step "A server of the published $OLD (SQLite), updated to $V1 (PostgreSQL)"
+  (cd "$IMS_HOME" && docker compose --env-file .env down -v >/dev/null 2>&1) || true
+  export IMS_HOME="$WORK/opt-old"
+  rm -f "$COOKIES"
+  odir="$REL/download/v$OLD"
+  mkdir -p "$odir"
+  for f in VERSION SHA256SUMS install.sh ims-server.tar.gz "ims-image-$ARCH.tar.gz"; do
+    curl -fsSL --retry 3 -o "$odir/$f" "https://github.com/ventixg/barcode-scanner/releases/download/v$OLD/$f"
+  done
+  check "release $OLD downloaded and verified" bash -c "cd '$odir' && grep -E ' \*?(VERSION|install\.sh|ims-server\.tar\.gz|ims-image-$ARCH\.tar\.gz)\$' SHA256SUMS | sha256sum -c --status"
+  publish_latest "$OLD"
+  curl -fsS "http://127.0.0.1:$WEB_PORT/releases/latest/download/install.sh" |
+    DOMAIN="$DOMAIN" ADMIN_PASSWORD="$ADMIN_PASSWORD" IMS_RELEASES_URL="http://127.0.0.1:$WEB_PORT/releases" \
+      HTTP_PORT="$HTTP_PORT" HTTPS_PORT="$HTTPS_PORT" IMS_TLS='tls internal' IMS_NO_OS_SETUP=1 bash -s -- --yes >/dev/null
+  check "running $OLD" test "$(health_version)" == "$OLD"
+  check "admin signs in" test "$(login admin "$ADMIN_PASSWORD")" == 200
+  api /products -o "$WORK/p.json" -H 'Content-Type: application/json' -d '{"sku":"LIFE-1","name":"Προϊόν της 1.2","initialQuantity":42}'
+  pid="$(node -p "require('$WORK/p.json').data.id")"
+  printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d >"$WORK/photo.png"
+  code="$(api "/products/$pid/image" -o /dev/null -w '%{http_code}' -F "image=@$WORK/photo.png;type=image/png")"
+  check "a product with stock 42 and a photo in $OLD" test "$code/$(stock_of_test_product)" == "200/42"
+  sqlite_sum="$(sha256sum "$IMS_HOME/data/inventory.db" | cut -d' ' -f1)"
+
+  publish_latest "$V1"
+  ims update --auto
+  check "the tool of $OLD updated the server to $V1" test "$(health_version)" == "$V1"
+  check "the product and its stock were copied into PostgreSQL" test "$(stock_of_test_product)/$(psql_val "SELECT COUNT(*) FROM products")" == "42/1"
+  photo="$(api "/products/$pid" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).data.imageUrl))')"
+  check "the photo was moved into the database" bash -c "curl -sk --noproxy '*' -b $COOKIES --resolve $DOMAIN:$HTTPS_PORT:127.0.0.1 https://$DOMAIN:$HTTPS_PORT$photo | cmp -s - '$WORK/photo.png'"
+  check "admin is still signed in after the update" test "$(api /auth/me -o /dev/null -w '%{http_code}')" == 200
+  check "the SQLite file was left untouched" test "$(sha256sum "$IMS_HOME/data/inventory.db" | cut -d' ' -f1)" == "$sqlite_sum"
+  check "a copy of the SQLite database was taken before the update" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-update-v${V1//./-}\.db\$'"
+  ims status >/dev/null
+  check "the new tool wrote down the database password (the one it was created with)" test "$(env_val POSTGRES_PASSWORD)" == "$(env_val JWT_SECRET)"
+  check "and the app still connects with it" bash -c "dcl() { docker compose --project-directory '$IMS_HOME' --env-file '$IMS_HOME/.env' \"\$@\" </dev/null; }; dcl up -d --force-recreate app >/dev/null 2>&1; for i in \$(seq 1 60); do [[ \"\$(curl -sk --noproxy '*' --resolve $DOMAIN:$HTTPS_PORT:127.0.0.1 https://$DOMAIN:$HTTPS_PORT/api/health)\" == *'\"ok\":true'* ]] && exit 0; sleep 2; done; exit 1"
+
+  step "Rollback to $OLD, used there, then updated again"
+  IMS_FORCE=1 ims rollback
+  check "running $OLD again" test "$(health_version)" == "$OLD"
+  check "its data as at the update (42)" test "$(stock_of_test_product)" == 42
+  check "the PostgreSQL data was kept as a copy" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-rollback\.json\.gz\$'"
+  check "the database container is gone" test -z "$(docker ps -aq --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME" --filter label=com.docker.compose.service=db)"
+  login admin "$ADMIN_PASSWORD" >/dev/null
+  code="$(api /stock/scan -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"code":"LIFE-1","mode":"OUT","quantity":2}')"
+  check "a sale of 2 in $OLD after the rollback" test "$code/$(stock_of_test_product)" == "201/40"
+  ims update
+  check "running $V1 again" test "$(health_version)" == "$V1"
+  login admin "$ADMIN_PASSWORD" >/dev/null
+  check "the sale made in $OLD is there (copied again: 40)" test "$(stock_of_test_product)" == 40
+  check "the data of the first copy was kept as a backup" bash -c "ls '$IMS_HOME/data/backups/' | grep -q 'before-reimport\.json\.gz\$'"
+fi

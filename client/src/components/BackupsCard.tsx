@@ -290,11 +290,18 @@ export function BackupsCard() {
                         ? t('Before update')
                         : f.name.includes('_before-migrate')
                           ? t('Before database upgrade')
-                          : t('Automatic');
+                          : f.name.includes('_before-rollback')
+                            ? t('Before returning to the previous version')
+                            : f.name.includes('_before-reimport')
+                              ? t('Before copying the data of version 1.2 again')
+                              : t('Automatic');
                 return (
                   <tr key={f.name}>
                     <Td className="tabular whitespace-nowrap">{fmtDateTime(f.createdAt)}</Td>
-                    <Td>{kind}</Td>
+                    <Td>
+                      {kind}
+                      {f.name.endsWith('.db') && <span className="ml-1 text-muted">({t('version 1.2')})</span>}
+                    </Td>
                     <Td align="right" className="tabular">{size(f.size)}</Td>
                     <Td align="right" className="whitespace-nowrap">
                       <IconButton label={t('Download')} onClick={() => download(`/backups/${encodeURIComponent(f.name)}/download`).catch((e) => toast.error(errMsg(e)))}>

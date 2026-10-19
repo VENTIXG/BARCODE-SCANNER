@@ -11,7 +11,9 @@ import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
 import { getDb, getSetting, initDb } from '../src/db/index.js';
-import { makeLegacyDb } from './helpers.js';
+import { readBackupFile } from '../src/db/dump.js';
+import { importLegacyIfPresent } from '../src/db/legacy/importSqlite.js';
+import { makeLegacyDb, openLegacyDb } from './helpers.js';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -24,9 +26,10 @@ const admin = request.agent(app);
 let untouched = false;
 
 beforeAll(async () => {
-  // A 1.0 database (schema 1: the import has to run the old upgrades too), closed without a
-  // checkpoint, so the latest rows are only in its -wal file.
-  const legacy = makeLegacyDb(config.legacyDbFile, 1);
+  // A 1.0 database (schema 1: the import has to run the old upgrades too), left as by a crash:
+  // the latest rows are only in its -wal file.
+  const writing = path.join(config.dataDir, 'writing.db');
+  const legacy = makeLegacyDb(writing, 1);
   legacy.pragma('wal_autocheckpoint = 0');
   const hash = bcrypt.hashSync('old-admin-password', 4);
   legacy.exec(`
@@ -53,13 +56,14 @@ beforeAll(async () => {
   tx.run(2, 'STOCK_OUT', 20, -8, 12, '2026-02-03T10:00:00.000Z');
   fs.mkdirSync(config.uploadsDir, { recursive: true });
   fs.writeFileSync(path.join(config.uploadsDir, 'old-photo.png'), PNG);
-  expect(fs.existsSync(`${config.legacyDbFile}-wal`)).toBe(true);
+  fs.copyFileSync(writing, config.legacyDbFile);
+  fs.copyFileSync(`${writing}-wal`, `${config.legacyDbFile}-wal`);
+  legacy.close();
   const files = [config.legacyDbFile, `${config.legacyDbFile}-wal`];
   const before = files.map(sha);
 
   await initDb();
   untouched = files.map(sha).join() === before.join();
-  legacy.close();
   expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'old-admin-password' })).status).toBe(200);
 });
 
@@ -108,6 +112,29 @@ describe('first start after the update from 1.2', () => {
 
   it('leaves the old database file untouched (a rollback to 1.2 still finds it)', () => {
     expect(untouched).toBe(true);
+  });
+});
+
+describe('rollback to 1.2 and update again', () => {
+  it('data written by 1.2 after the copy is copied again; the newer data is kept as a backup', async () => {
+    const db = getDb();
+    await importLegacyIfPresent(db, { quiet: true, backupDir: config.dataDir });
+    expect(await db.value("SELECT COUNT(*) FROM products WHERE sku = 'NEW-1'")).toBe(1); // file unchanged: nothing happens
+
+    // Version 1.2 runs again (after a rollback) and is used.
+    const legacy = openLegacyDb(config.legacyDbFile);
+    legacy.prepare("INSERT INTO products (id, sku, name) VALUES (8, 'AFTER-ROLLBACK', 'Made in 1.2 again')").run();
+    legacy.close();
+
+    await importLegacyIfPresent(db, { quiet: true, backupDir: config.dataDir });
+    expect(await db.column('SELECT sku::text FROM products ORDER BY id')).toEqual(['OLD-7', 'AFTER-ROLLBACK']);
+    const copies = fs.readdirSync(config.dataDir).filter((f) => f.endsWith('_before-reimport.json.gz'));
+    expect(copies).toHaveLength(1);
+    const saved = await readBackupFile(path.join(config.dataDir, copies[0]));
+    expect(saved.tables.products.map((p) => p.sku)).toContain('NEW-1');
+    // Signed out: the user table was replaced.
+    expect((await admin.get('/api/auth/me')).status).toBe(401);
+    expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'old-admin-password' })).status).toBe(200);
   });
 });
 

@@ -46,9 +46,9 @@ async function columnsOf(db: Sql, table: string): Promise<ColumnInfo[]> {
 
 const toBase64 = (v: unknown) => Buffer.from(v as Uint8Array).toString('base64');
 
-/** All rows of all tables, in a consistent state (read inside one transaction). */
+/** All rows of all tables, in a consistent state (one snapshot; the app keeps working meanwhile). */
 export async function dumpTables(db: Sql): Promise<{ schema: number; tables: BackupTables }> {
-  return db.tx(async (t) => {
+  return db.snapshot(async (t) => {
     const schema = (await t.value<number>('SELECT MAX(version) FROM schema_migrations')) ?? 0;
     const tables: BackupTables = {};
     for (const table of TABLES) {

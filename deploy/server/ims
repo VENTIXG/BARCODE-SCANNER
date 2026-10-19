@@ -5,18 +5,20 @@
 #   ims update                  install the newest version now
 #   ims rollback                return to the version that ran before the last update
 #   ims backup                  back up the database now
-#   ims restore <file>          replace the database with a backup (the current data is kept as a copy)
+#   ims restore <file>          replace the data with a backup (the current data is kept as a copy)
 #   ims reset-password <user>   new temporary password, e.g. for a locked-out administrator
 #   ims offsite                 set up copies of the backups in cloud storage (S3-compatible)
 #   ims auto-update on [HH:MM] | off
+#   ims psql                    SQL console of the database (for support)
 #   ims logs | start | stop | restart
 #
 # Every update: database backup -> new version -> health check. If the new version does not
 # become healthy, the previous version is started again (and its database copy restored
 # when the new version had already upgraded the database).
 #
-# Files: /opt/warehouse-ims/.env (settings), data/ (database, photos, backups),
-#        state/ (update status, shown in the app), requests/ ("check now" from the app).
+# Files: /opt/warehouse-ims/.env (settings), postgres/ (the PostgreSQL database),
+#        data/ (backups; inventory.db of versions up to 1.2), state/ (update status, shown in
+#        the app), requests/ ("check now" from the app).
 set -Eeuo pipefail
 umask 022
 
@@ -27,6 +29,7 @@ ENV_FILE="$IMS_HOME/.env"
 STATE_DIR="$IMS_HOME/state"
 REQUEST_DIR="$IMS_HOME/requests"
 DATA_DIR="$IMS_HOME/data"
+PG_DIR="$IMS_HOME/postgres"
 DOWNLOAD_DIR="$IMS_HOME/releases"
 DEFAULT_RELEASES_URL="https://github.com/ventixg/barcode-scanner/releases"
 APP_UID=1000 # user "node" inside the image
@@ -72,6 +75,27 @@ env_set() { # KEY VALUE
 }
 
 releases_url() { env_get IMS_RELEASES_URL "$DEFAULT_RELEASES_URL"; }
+
+# Servers installed before 1.3 have no database password: the PostgreSQL container then
+# started with JWT_SECRET (see docker-compose.yml). Write it down, so it never changes.
+ensure_db_env() {
+  [[ -f "$ENV_FILE" && -n "$(env_get JWT_SECRET)" ]] || return 0
+  [[ -z "$(env_get POSTGRES_PASSWORD)" ]] || return 0
+  # Not while another ims command (e.g. the update to 1.3 itself) may be creating the database.
+  exec 8>"$IMS_HOME/.lock"
+  if flock -n 8; then
+    if [[ -n "$(ls -A "$PG_DIR" 2>/dev/null)" ]]; then
+      env_set POSTGRES_PASSWORD "$(env_get JWT_SECRET)"
+    else
+      env_set POSTGRES_PASSWORD "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    fi
+    flock -u 8
+  fi
+  exec 8>&-
+}
+
+# Versions up to 1.2 kept the data in data/inventory.db (SQLite); 1.3 and later in PostgreSQL.
+sqlite_era() { version_gt 1.3.0 "$1"; }
 
 # ---- Docker -------------------------------------------------------------------------------
 
@@ -122,7 +146,23 @@ app_cli() {
   fi
 }
 
-# Schema version of a database file under data/ (works with every version of the image).
+# The database container (when the database is not a hosted one).
+db_up() {
+  [[ "$(env_get IMS_DB_SCALE 1)" == 0 ]] && return 0
+  dc up -d --wait db >/dev/null 2>&1 || dc up -d db >/dev/null 2>&1 || true
+}
+
+# Schema version of the database (1.3+), or of a backup file under data/ (.json.gz or .db).
+db_schema() { # [path relative to data/]
+  db_up
+  if [[ -n "${1:-}" ]]; then
+    dc run --rm --no-deps -T app node server/dist/cli.js schema-version "/data/$1" 2>/dev/null | tail -n1
+  else
+    dc run --rm --no-deps -T app node server/dist/cli.js schema-version 2>/dev/null | tail -n1
+  fi
+}
+
+# Schema version of an SQLite database file under data/ (versions up to 1.2).
 schema_of() { # path relative to data/
   dc run --rm --no-deps -T --entrypoint node app -e "
     const D = require('better-sqlite3');
@@ -308,7 +348,7 @@ install_units() {
 }
 
 prepare_dirs() {
-  mkdir -p "$DATA_DIR" "$STATE_DIR" "$REQUEST_DIR" "$DOWNLOAD_DIR"
+  mkdir -p "$DATA_DIR" "$STATE_DIR" "$REQUEST_DIR" "$DOWNLOAD_DIR" "$PG_DIR"
   chown "$APP_UID:$APP_UID" "$DATA_DIR" "$REQUEST_DIR"
   chmod 755 "$STATE_DIR"
 }
@@ -338,25 +378,37 @@ lock() {
   flock -n 9 || die "Τρέχει ήδη άλλη εντολή ims (ενημέρωση ή επαναφορά). Δοκιμάστε σε λίγο."
 }
 
+# Restore a backup with the program of the version now installed (run after switching versions).
 restore_db_copy() { # backup file name under data/backups
   say "  Επαναφορά του αντιγράφου βάσης $1…"
   dc stop app >/dev/null 2>&1 || true
-  cp "$DATA_DIR/backups/$1" "$DATA_DIR/inventory.db.restoring"
-  rm -f "$DATA_DIR/inventory.db-wal" "$DATA_DIR/inventory.db-shm"
-  mv -f "$DATA_DIR/inventory.db.restoring" "$DATA_DIR/inventory.db"
-  chown "$APP_UID:$APP_UID" "$DATA_DIR/inventory.db"
+  if sqlite_era "$(env_get IMS_VERSION)"; then
+    cp "$DATA_DIR/backups/$1" "$DATA_DIR/inventory.db.restoring"
+    rm -f "$DATA_DIR/inventory.db-wal" "$DATA_DIR/inventory.db-shm"
+    mv -f "$DATA_DIR/inventory.db.restoring" "$DATA_DIR/inventory.db"
+    chown "$APP_UID:$APP_UID" "$DATA_DIR/inventory.db"
+  else
+    db_up
+    # --reset: the newer version's database is replaced completely (it was saved just before).
+    dc run --rm --no-deps -T app node server/dist/cli.js restore "/data/backups/$1" --reset
+  fi
 }
 
 # Keep the current database as a backup before an older copy replaces it.
 save_current_db() {
   local name
+  db_up
   name="$(app_cli backup before-rollback 2>/dev/null | tail -n1)" || name=""
   if [[ -z "$name" || ! -f "$DATA_DIR/backups/$name" ]]; then
-    # The new version may not even start: copy the file with the app stopped.
+    # The new version may not even start: a dump straight from PostgreSQL (restorable with pg_restore).
+    [[ "$(env_get IMS_DB_SCALE 1)" != 0 ]] || return 1
     dc stop app >/dev/null 2>&1 || true
-    name="inventory_$(date +%Y-%m-%d_%H%M%S)_before-rollback.db"
+    name="inventory_$(date +%Y-%m-%d_%H%M%S)_before-rollback.pgdump"
     mkdir -p "$DATA_DIR/backups"
-    cp "$DATA_DIR/inventory.db" "$DATA_DIR/backups/$name" || return 1
+    dc exec -T db pg_dump -U ims -d ims -Fc >"$DATA_DIR/backups/$name" && [[ -s "$DATA_DIR/backups/$name" ]] || {
+      rm -f "$DATA_DIR/backups/$name"
+      return 1
+    }
     chown "$APP_UID:$APP_UID" "$DATA_DIR/backups/$name"
   fi
   say "  Τα τρέχοντα δεδομένα φυλάχτηκαν: data/backups/$name"
@@ -365,7 +417,7 @@ save_current_db() {
 # Back to IMS_PREVIOUS_VERSION. When the newer version has upgraded the database, the copy
 # taken before that update is restored (the older program cannot read the upgraded one).
 rollback_to_previous() { # REASON auto|manual
-  local cur prev backup now_schema copy_schema restore=0
+  local cur prev backup now_schema copy_schema restore=0 to_sqlite=0
   cur="$(env_get IMS_VERSION)"
   prev="$(env_get IMS_PREVIOUS_VERSION)"
   backup="$(env_get IMS_LAST_UPDATE_BACKUP)"
@@ -374,21 +426,35 @@ rollback_to_previous() { # REASON auto|manual
     { fetch_release "$prev" && load_image "$prev"; } || die "Δεν βρέθηκε η έκδοση $prev."
   fi
   [[ -f "$DOWNLOAD_DIR/$prev/ims-server.tar.gz" ]] || fetch_release "$prev" || die "Δεν βρέθηκαν τα αρχεία της έκδοσης $prev."
-  if [[ -n "$backup" && -f "$DATA_DIR/backups/$backup" ]]; then
-    now_schema="$(schema_of inventory.db || echo '?')"
-    copy_schema="$(schema_of "backups/$backup" || echo '?')"
+  if sqlite_era "$prev" && ! sqlite_era "$cur"; then
+    # Back to SQLite: its file (data/inventory.db) was never changed by the newer version, so
+    # nothing is restored. Changes made since the update are only in PostgreSQL.
+    to_sqlite=1
+  elif [[ -n "$backup" && -f "$DATA_DIR/backups/$backup" ]]; then
+    if sqlite_era "$cur"; then
+      now_schema="$(schema_of inventory.db || echo '?')"
+      copy_schema="$(schema_of "backups/$backup" || echo '?')"
+    else
+      now_schema="$(db_schema || echo '?')"
+      copy_schema="$(db_schema "backups/$backup" || echo '?')"
+    fi
     [[ "$now_schema" != "$copy_schema" ]] && restore=1
   fi
-  if ((restore)) && [[ "$2" == manual && "${IMS_FORCE:-0}" != 1 ]]; then
-    warn "Η έκδοση $cur έχει αναβαθμίσει τη βάση και η $prev δεν μπορεί να τη διαβάσει."
-    warn "Θα επανέλθει το αντίγραφο $backup: ό,τι καταχωρήθηκε μετά από αυτό δεν θα φαίνεται (τα τωρινά δεδομένα φυλάσσονται ως αντίγραφο)."
+  if ((restore || to_sqlite)) && [[ "$2" == manual && "${IMS_FORCE:-0}" != 1 ]]; then
+    if ((to_sqlite)); then
+      warn "Η έκδοση $prev κρατά τα δεδομένα στη δική της βάση (SQLite): θα δείτε τα δεδομένα όπως ήταν την ώρα της ενημέρωσης."
+      warn "Ό,τι καταχωρήθηκε στην $cur φυλάσσεται ως αντίγραφο. Αν ξαναενημερώσετε χωρίς να δουλέψετε στην $prev, επανέρχεται μόνο του."
+    else
+      warn "Η έκδοση $cur έχει αναβαθμίσει τη βάση και η $prev δεν μπορεί να τη διαβάσει."
+      warn "Θα επανέλθει το αντίγραφο $backup: ό,τι καταχωρήθηκε μετά από αυτό δεν θα φαίνεται (τα τωρινά δεδομένα φυλάσσονται ως αντίγραφο)."
+    fi
     has_tty || die "Για να συνεχίσετε: sudo IMS_FORCE=1 ims rollback"
     ask "Συνέχεια; (ν/ο)" "ο"
     [[ "$REPLY" =~ ^[νΝyY] ]] || die "Ακυρώθηκε. Τίποτα δεν άλλαξε."
   fi
   say "Επιστροφή στην έκδοση $prev…"
   status_set state=updating "message=Επιστροφή στην έκδοση $prev"
-  if ((restore)); then save_current_db || die "Δεν φυλάχτηκαν τα τρέχοντα δεδομένα: η επιστροφή σταμάτησε."; fi
+  if ((restore || to_sqlite)); then save_current_db || die "Δεν φυλάχτηκαν τα τρέχοντα δεδομένα: η επιστροφή σταμάτησε."; fi
   dc stop app >/dev/null 2>&1 || true
   CADDY_CHANGED=0
   install_stack_files "$prev" || die "Τα αρχεία της έκδοσης $prev είναι ελαττωματικά."
@@ -442,6 +508,7 @@ do_update() { # TARGET_VERSION
 
   say "4/5 Εκκίνηση της $target…"
   docker pull -q caddy:2 >/dev/null 2>&1 || true
+  docker pull -q postgres:18 >/dev/null 2>&1 || true
   if dc up -d --remove-orphans >/dev/null 2>&1; then
     [[ "$CADDY_CHANGED" == 1 ]] && dc restart caddy >/dev/null 2>&1 || true
     say "5/5 Έλεγχος λειτουργίας…"
@@ -519,7 +586,12 @@ cmd_status() {
   say "  Κατάσταση app:      $health${v:+ (τρέχει η $v)}"
   say "  Αυτόματες ενημ/σεις: $(env_get IMS_AUTO_UPDATE true) στις $(env_get IMS_UPDATE_TIME 03:30)"
   say "  Τελευταίος έλεγχος: $(status_get lastCheckAt) — $(status_get lastResult) $(status_get message)"
-  say "  Backups:            $(find "$DATA_DIR/backups" -maxdepth 1 -name '*.db' 2>/dev/null | wc -l) αρχεία, τελευταίο: $(ls -1t "$DATA_DIR/backups"/*.db 2>/dev/null | head -n1 | xargs -r basename)"
+  if [[ -n "$(env_get DATABASE_URL)" ]]; then
+    say "  Βάση δεδομένων:     PostgreSQL εξωτερική ($(env_get DATABASE_URL | sed -E 's|^[a-z]+://([^@/]*@)?([^/?]*).*|\2|'))"
+  else
+    say "  Βάση δεδομένων:     PostgreSQL ($(du -sh "$PG_DIR" 2>/dev/null | cut -f1) στο $PG_DIR)"
+  fi
+  say "  Backups:            $(find "$DATA_DIR/backups" -maxdepth 1 \( -name '*.json.gz' -o -name '*.db' \) 2>/dev/null | wc -l) αρχεία, τελευταίο: $(ls -1t "$DATA_DIR/backups"/*.json.gz "$DATA_DIR/backups"/*.db 2>/dev/null | head -n1 | xargs -r basename)"
   say "  Cloud backup:       $([[ -n "$(env_get S3_BUCKET)" ]] && echo "ναι ($(env_get S3_BUCKET))" || echo 'όχι (sudo ims offsite)')"
   say "  Ελεύθερος χώρος:    $(df -h "$IMS_HOME" | awk 'NR==2 {print $4 " από " $2}')"
 }
@@ -533,17 +605,19 @@ cmd_backup() {
 
 cmd_restore() { # FILE
   need_root restore
-  [[ -n "${1:-}" ]] || die "Χρήση: sudo ims restore <αρχείο .db ή όνομα από data/backups>"
+  [[ -n "${1:-}" ]] || die "Χρήση: sudo ims restore <αρχείο .json.gz ή .db, ή όνομα από data/backups>"
   lock
-  local src="$1" name
+  local src="$1" name ext=json.gz
   [[ -f "$src" ]] || src="$DATA_DIR/backups/$1"
   [[ -f "$src" ]] || die "Δεν βρέθηκε το αρχείο $1"
-  name="restore-$(date +%Y%m%d%H%M%S).db"
+  [[ "$src" == *.db ]] && ext=db
+  name="restore-$(date +%Y%m%d%H%M%S).$ext"
   mkdir -p "$DATA_DIR/backups"
   cp "$src" "$DATA_DIR/$name"
   chown "$APP_UID:$APP_UID" "$DATA_DIR/$name"
   say "Διακοπή της εφαρμογής…"
   dc stop app >/dev/null
+  db_up
   if ! dc run --rm --no-deps -T app node server/dist/cli.js restore "/data/$name"; then
     rm -f "$DATA_DIR/$name"
     dc up -d app >/dev/null
@@ -664,6 +738,7 @@ cmd_watchdog() {
     healthy | starting) ;;
     unhealthy)
       echo "app unhealthy: restarting"
+      db_up
       dc restart app >/dev/null 2>&1 || true
       ;;
     *)
@@ -710,6 +785,9 @@ cmd_handle_request() {
   cmd_update --requested
 }
 
+# Every command run as root first brings .env up to date (no-op when it already is).
+[[ $EUID -eq 0 ]] && ensure_db_env
+
 case "${1:-help}" in
   status) cmd_status ;;
   update) shift; cmd_update "${1:-manual}" ;;
@@ -720,6 +798,11 @@ case "${1:-help}" in
   offsite) cmd_offsite ;;
   auto-update) shift; cmd_auto_update "$@" ;;
   logs) dc logs -f --tail 200 app ;;
+  psql)
+    need_root psql
+    [[ "$(env_get IMS_DB_SCALE 1)" != 0 ]] || die "Η βάση είναι εξωτερική: συνδεθείτε με τα στοιχεία του DATABASE_URL."
+    docker compose -p "$(project)" --project-directory "$IMS_HOME" --env-file "$ENV_FILE" exec db psql -U ims -d ims
+    ;;
   start)
     need_root start
     rm -f "$STATE_DIR/stopped"
@@ -740,6 +823,6 @@ case "${1:-help}" in
   bootstrap) shift; cmd_bootstrap "${1:-}" ;;
   render-status) status_render ;;
   version) env_get IMS_VERSION ;;
-  help | -h | --help) sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help | -h | --help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) die "Άγνωστη εντολή: $1 (δείτε: ims help)" ;;
 esac

@@ -11,6 +11,7 @@
  *   await db.run(sql, ...params)    { changes, rows } (rows: what RETURNING gave)
  *   await db.exec(sql)              several statements, no parameters (migrations)
  *   await db.tx(async (t) => ...)   a transaction; nested calls become savepoints
+ *   await db.snapshot(async (t) => ...)  consistent reads only (backups), writers are not held up
  *
  * Parameters are written as ? (positional) or @name (pass one object), and numbered for
  * PostgreSQL ($1, $2, ...). Results keep the conventions of the earlier SQLite code: bigint and
@@ -40,6 +41,8 @@ export interface Sql {
   run(text: string, ...params: Param[] | [Named]): Promise<RunResult>;
   exec(text: string): Promise<void>;
   tx<T>(fn: (t: Sql) => Promise<T>): Promise<T>;
+  /** Read-only: every query sees the same moment, without taking the write lock. */
+  snapshot<T>(fn: (t: Sql) => Promise<T>): Promise<T>;
 }
 
 export interface Database extends Sql {
@@ -169,6 +172,11 @@ abstract class Handle implements Sql {
   abstract exec(text: string): Promise<void>;
   abstract tx<T>(fn: (t: Sql) => Promise<T>): Promise<T>;
 
+  /** PGlite has one connection: a transaction is already a consistent view. */
+  snapshot<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
+    return this.tx(fn);
+  }
+
   async all<T = Row>(text: string, ...params: Param[] | [Named]): Promise<T[]> {
     const b = bind(text, params);
     return (await this._query(b.text, b.values)).rows as T[];
@@ -201,6 +209,11 @@ abstract class TxHandle extends Handle {
   private depth = 0;
   constructor(readonly root: Handle) {
     super();
+  }
+
+  /** Inside a transaction: it already sees one consistent state. */
+  override snapshot<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
+    return fn(this);
   }
 
   async tx<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
@@ -268,14 +281,23 @@ class PgDatabase extends Handle implements Database {
     await this.pool.query(text);
   }
 
-  async tx<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
+  tx<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
     const open = current(this);
     if (open) return open.tx(fn);
+    return this.runIn(['BEGIN', `SELECT pg_advisory_xact_lock(${WRITE_LOCK})`], fn);
+  }
+
+  override snapshot<T>(fn: (t: Sql) => Promise<T>): Promise<T> {
+    const open = current(this);
+    if (open) return open.snapshot(fn);
+    return this.runIn(['BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'], fn);
+  }
+
+  private async runIn<T>(begin: string[], fn: (t: Sql) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     const t = new PgTx(this, client);
     try {
-      await client.query('BEGIN');
-      await client.query('SELECT pg_advisory_xact_lock($1)', [WRITE_LOCK]);
+      for (const q of begin) await client.query(q);
       const out = await als.run(t, () => fn(t));
       await client.query('COMMIT');
       return out;

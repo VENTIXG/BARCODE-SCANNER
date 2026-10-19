@@ -118,8 +118,9 @@ function isRunning(pid: number) {
 export async function openDatabase(opts: OpenOptions = {}): Promise<Database> {
   const db = await connect(opts);
   try {
-    await migrate(db, migrations, opts.backupDir === undefined ? defaultBackupDir() : opts.backupDir);
-    if (opts.importLegacy !== false) await importLegacyIfPresent(db, opts.quiet);
+    const backupDir = opts.backupDir === undefined ? defaultBackupDir() : opts.backupDir;
+    await migrate(db, migrations, backupDir);
+    if (opts.importLegacy !== false) await importLegacyIfPresent(db, { quiet: opts.quiet, backupDir });
     await ensureBaseData(db, opts.quiet);
   } catch (e) {
     await db.close().catch(() => {});

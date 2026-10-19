@@ -1,16 +1,37 @@
 # Build and run the server from this checkout (development, staging, trying changes).
 # Real servers are installed with deploy/install.sh instead: prebuilt images, automatic
 # updates with rollback, backups (see deploy/DEPLOY.md).
-#   cp .env.example .env   -> set DOMAIN, JWT_SECRET, ADMIN_PASSWORD, COOKIE_SECURE
+#   cp .env.example .env   -> set DOMAIN, JWT_SECRET, POSTGRES_PASSWORD, ADMIN_PASSWORD, COOKIE_SECURE
 #   docker compose up -d --build
 name: warehouse-ims-dev
 
 services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ims
+      POSTGRES_DB: ims
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (a long random string)}
+    volumes:
+      - ims-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ims -d ims -h 127.0.0.1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
   app:
     build: .
     image: warehouse-ims:dev
     restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
+      DATABASE_URL: postgres://ims@db:5432/ims
+      PGPASSWORD: ${POSTGRES_PASSWORD}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env (a long random string)}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env for the first start}
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
@@ -38,6 +59,7 @@ services:
       - caddy-config:/config
 
 volumes:
+  ims-db:
   ims-data:
   caddy-data:
   caddy-config:

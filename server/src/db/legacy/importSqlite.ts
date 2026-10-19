@@ -9,13 +9,14 @@
  * The file is read from a temporary copy, brought to the last SQLite schema with the old
  * migrations, and turned into backup rows (photos from the uploads folder included).
  */
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../../config.js';
 import { TABLES, type BackupTables } from '../migrations.js';
-import { loadTables } from '../dump.js';
+import { loadTables, writeBackup } from '../dump.js';
 import type { Sql } from '../sql.js';
 import { migrations as sqliteMigrations } from './sqliteMigrations.js';
 
@@ -131,14 +132,66 @@ function renameCaseClashes(tables: BackupTables): string[] {
   return renamed;
 }
 
+interface LegacyMark {
+  size: number;
+  mtimeMs: number;
+  sha256: string;
+}
+
+/** Size and time of the old file and its -wal: a quick check whether the old version wrote to it. */
+function quickMark(file: string): Omit<LegacyMark, 'sha256'> {
+  let size = 0;
+  let mtimeMs = 0;
+  for (const f of [file, `${file}-wal`]) {
+    if (!fs.existsSync(f)) continue;
+    const st = fs.statSync(f);
+    size += st.size;
+    mtimeMs = Math.max(mtimeMs, Math.round(st.mtimeMs));
+  }
+  return { size, mtimeMs };
+}
+
+function contentHash(file: string): string {
+  const h = crypto.createHash('sha256');
+  for (const f of [file, `${file}-wal`]) if (fs.existsSync(f)) h.update(fs.readFileSync(f));
+  return h.digest('hex');
+}
+
 /**
- * First start after the update from 1.2: copy inventory.db into the new, empty database.
- * Runs in one transaction; if anything fails, nothing is kept and the next start tries again.
+ * The data of version 1.2 (inventory.db) into PostgreSQL:
+ *  - first start after the update, empty database: copied;
+ *  - the old version wrote to its file after that copy (it ran again after a rollback, and
+ *    was used): its data is the newer one, so it is copied again, after a backup of the
+ *    current data (label before-reimport).
+ * Each copy runs in one transaction: if anything fails, nothing is kept and the next start
+ * tries again. The old file itself is never changed.
  */
-export async function importLegacyIfPresent(db: Sql, quiet = false) {
+export async function importLegacyIfPresent(db: Sql, opts: { quiet?: boolean; backupDir?: string | null } = {}) {
   const file = config.legacyDbFile;
   if (!fs.existsSync(file)) return;
-  if (((await db.value<number>('SELECT COUNT(*) FROM users')) ?? 0) > 0) return;
+  const quick = quickMark(file);
+  let mark: LegacyMark | null = null;
+  if (((await db.value<number>('SELECT COUNT(*) FROM users')) ?? 0) > 0) {
+    const saved = await db.value<string>("SELECT value FROM settings WHERE key = 'legacy_import'");
+    // A database that was never filled from the old file is not touched.
+    if (!saved) return;
+    mark = JSON.parse(saved) as LegacyMark;
+    if (mark.size === quick.size && mark.mtimeMs === quick.mtimeMs) return;
+    const sha256 = contentHash(file);
+    if (sha256 === mark.sha256) {
+      await saveMark(db, { ...quick, sha256 });
+      return;
+    }
+    console.warn(`[import] ${file} was changed by the previous version after it was copied: copying its data again.`);
+    const dir = (await db.value<string>("SELECT value FROM settings WHERE key = 'backup_dir'"))?.trim() || opts.backupDir;
+    if (dir) {
+      const { stampedName } = await import('../index.js');
+      const copy = path.join(dir, stampedName('before-reimport'));
+      await writeBackup(db, copy);
+      console.warn(`[import] The data until now was saved as ${copy}`);
+    }
+  }
+  const sha256 = contentHash(file);
   const { tables, renamed } = readSqliteFile(file);
   await db.tx(async (t) => {
     await loadTables(t, tables);
@@ -147,10 +200,20 @@ export async function importLegacyIfPresent(db: Sql, quiet = false) {
        ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
       `${file} (${new Date().toISOString()})`,
     );
+    await saveMark(t, { ...quick, sha256 });
+    // Sessions of the replaced data are not valid any more.
+    if (mark) await t.run('UPDATE users SET token_version = token_version + 1');
   });
-  if (!quiet) {
+  if (!opts.quiet) {
     const counts = TABLES.filter((t) => tables[t]?.length).map((t) => `${t} ${tables[t].length}`);
     console.log(`[import] Copied the data of the previous version (${file}) into PostgreSQL: ${counts.join(', ')}`);
     for (const r of renamed) console.warn(`[import] Renamed a duplicate that differed only in letter case: ${r}`);
   }
+}
+
+async function saveMark(db: Sql, mark: LegacyMark) {
+  await db.run(
+    `INSERT INTO settings (key, value) VALUES ('legacy_import', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+    JSON.stringify(mark),
+  );
 }

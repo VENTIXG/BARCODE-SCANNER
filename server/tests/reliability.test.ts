@@ -5,7 +5,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { connect, initDb, migrate } from '../src/db/index.js';
+import { connect, getDb, initDb, migrate } from '../src/db/index.js';
 import { readBackupFile } from '../src/db/dump.js';
 import { latestSchemaVersion, migrations } from '../src/db/migrations.js';
 
@@ -121,6 +121,26 @@ describe('concurrency', () => {
   });
 });
 
+describe('backups and writers', () => {
+  it.skipIf(!process.env.TEST_DATABASE_URL)('a backup reads one moment and does not hold up writes (PostgreSQL server)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let seen = -1;
+    const reading = getDb().snapshot(async (t) => {
+      await t.value('SELECT COUNT(*) FROM products');
+      await gate;
+      seen = (await t.value<number>("SELECT COUNT(*) FROM products WHERE sku = 'SNAP-1'"))!;
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    const started = Date.now();
+    await product('SNAP-1', 1); // a write while the backup is reading
+    expect(Date.now() - started).toBeLessThan(2000);
+    release();
+    await reading;
+    expect(seen).toBe(0);
+  });
+});
+
 describe('real-time events', () => {
   it('pushes a change event to a listening browser when another user writes', async () => {
     const controller = new AbortController();
@@ -174,5 +194,5 @@ describe('migrations never lose data', () => {
     } finally {
       await db.close();
     }
-  });
+  }, 30_000);
 });

@@ -15,6 +15,8 @@
 #   TZ                time zone (default Europe/Athens)
 #   IMS_UPDATE_TIME   time of the nightly automatic update (default 03:30)
 #   IMS_VERSION       install this version instead of the newest
+#   DATABASE_URL      optional: a hosted PostgreSQL (postgres://user:password@host:5432/db?sslmode=require)
+#                     instead of the database container on this server
 # Options:
 #   --yes             no questions
 #   --lan             no domain: plain HTTP on port 80, only for a closed office network
@@ -151,6 +153,8 @@ main() {
       echo "DOMAIN='$DOMAIN'"
       echo "COOKIE_SECURE='$COOKIE_SECURE'"
       echo "JWT_SECRET='$(random_hex 48)'"
+      # Password of the PostgreSQL database (its own container, never reachable from outside).
+      echo "POSTGRES_PASSWORD='$(random_hex 32)'"
       echo "ADMIN_PASSWORD='$ADMIN_PASSWORD'"
       echo "TZ='${TZ:-Europe/Athens}'"
       echo "SESSION_HOURS='12'"
@@ -160,6 +164,11 @@ main() {
       for key in IMS_RELEASES_URL HTTP_PORT HTTPS_PORT IMS_TLS COMPOSE_PROJECT_NAME; do
         if [[ -n "${!key:-}" ]]; then echo "$key='${!key}'"; fi
       done
+      # A hosted PostgreSQL instead of the built-in container.
+      if [[ -n "${DATABASE_URL:-}" ]]; then
+        echo "DATABASE_URL='$DATABASE_URL'"
+        echo "IMS_DB_SCALE='0'"
+      fi
     } >"$ENV_FILE"
     chmod 600 "$ENV_FILE"
   else
