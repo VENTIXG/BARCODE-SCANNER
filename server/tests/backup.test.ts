@@ -67,6 +67,13 @@ describe('backups', () => {
     expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
   });
 
+  it('restoring the same backup again signs everyone out again', async () => {
+    expect((await admin.get('/api/auth/me')).status).toBe(200);
+    expect((await admin.post(`/api/backups/${backupName}/restore`)).status).toBe(200);
+    expect((await admin.get('/api/auth/me')).status).toBe(401);
+    expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
+  });
+
   it('rejects files that are not backups', async () => {
     expect((await admin.post('/api/backups/../../etc/passwd/restore')).status).toBeGreaterThanOrEqual(400);
     const res = await admin.post('/api/backups/restore-upload').attach('file', Buffer.from('not a database'), 'evil.db');

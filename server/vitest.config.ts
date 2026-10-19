@@ -5,5 +5,8 @@ export default defineConfig({
     environment: 'node',
     setupFiles: ['./tests/setup.ts'],
     pool: 'forks',
+    // Starting the built-in PostgreSQL (WebAssembly) takes a few seconds on a busy machine.
+    hookTimeout: 60_000,
+    testTimeout: 30_000,
   },
 });

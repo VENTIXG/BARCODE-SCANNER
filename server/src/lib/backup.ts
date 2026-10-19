@@ -161,10 +161,23 @@ export async function validateBackupFile(file: string) {
 export async function loadBackupData(db: DB, data: BackupData) {
   if (!data.tables.users?.length) throw badRequest('This backup has no users', 'INVALID_BACKUP');
   await db.tx(async (t) => {
+    const before = await sessionVersionBound(t);
     await loadTables(t, data.tables);
-    // Sessions refer to user ids of the previous data.
-    await t.run('UPDATE users SET token_version = token_version + 1');
+    await signOutEveryone(t, before);
   });
+}
+
+/** Higher than every session version in use now (read before the users are replaced). */
+export async function sessionVersionBound(t: DB): Promise<number> {
+  return ((await t.value<number>('SELECT MAX(token_version) FROM users')) ?? 0) + 1;
+}
+
+/**
+ * After the users were replaced: no session of before may stay valid, whatever versions the
+ * loaded rows have (a session's version must match its user's exactly).
+ */
+export async function signOutEveryone(t: DB, bound: number) {
+  await t.run('UPDATE users SET token_version = token_version + ?', bound);
 }
 
 /**

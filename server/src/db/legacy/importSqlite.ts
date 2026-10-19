@@ -194,6 +194,8 @@ export async function importLegacyIfPresent(db: Sql, opts: { quiet?: boolean; ba
   const sha256 = contentHash(file);
   const { tables, renamed } = readSqliteFile(file);
   await db.tx(async (t) => {
+    // Higher than every session version in use: no session of the replaced data stays valid.
+    const bound = ((await t.value<number>('SELECT MAX(token_version) FROM users')) ?? 0) + 1;
     await loadTables(t, tables);
     await t.run(
       `INSERT INTO settings (key, value) VALUES ('legacy_imported_from', ?)
@@ -202,7 +204,7 @@ export async function importLegacyIfPresent(db: Sql, opts: { quiet?: boolean; ba
     );
     await saveMark(t, { ...quick, sha256 });
     // Sessions of the replaced data are not valid any more.
-    if (mark) await t.run('UPDATE users SET token_version = token_version + 1');
+    if (mark) await t.run('UPDATE users SET token_version = token_version + ?', bound);
   });
   if (!opts.quiet) {
     const counts = TABLES.filter((t) => tables[t]?.length).map((t) => `${t} ${tables[t].length}`);
