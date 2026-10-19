@@ -86,40 +86,39 @@ export class InsufficientStockError extends HttpError {
   }
 }
 
-export function negativeStockAllowed(db: DB) {
-  return getSetting('allow_negative_stock', db) === 'true';
+export async function negativeStockAllowed(db: DB) {
+  return (await getSetting('allow_negative_stock', db)) === 'true';
 }
 
-export function getProductRef(db: DB, productId: number): ProductRef {
-  const p = db.prepare('SELECT id, sku, name, unit, status FROM products WHERE id = ?').get(productId) as
-    | ProductRef
-    | undefined;
+export async function getProductRef(db: DB, productId: number): Promise<ProductRef> {
+  const p = await db.get<ProductRef>('SELECT id, sku, name, unit, status FROM products WHERE id = ?', productId);
   if (!p) throw notFound(`Product #${productId} not found`);
   return p;
 }
 
 /** Current quantity of a product in a warehouse (0 if never stocked). */
-export function getQuantity(db: DB, productId: number, warehouseId = getDefaultWarehouseId(db)): number {
-  const q = db
-    .prepare('SELECT quantity FROM inventory WHERE product_id = ? AND warehouse_id = ?')
-    .pluck()
-    .get(productId, warehouseId) as number | undefined;
+export async function getQuantity(db: DB, productId: number, warehouseId?: number): Promise<number> {
+  const wh = warehouseId ?? (await getDefaultWarehouseId(db));
+  const q = await db.value<number>('SELECT quantity FROM inventory WHERE product_id = ? AND warehouse_id = ?', productId, wh);
   return q ?? 0;
 }
 
-export function ensureInventoryRow(db: DB, productId: number, warehouseId: number) {
-  db.prepare('INSERT OR IGNORE INTO inventory (product_id, warehouse_id, quantity) VALUES (?, ?, 0)').run(
+export async function ensureInventoryRow(db: DB, productId: number, warehouseId: number) {
+  await db.run(
+    'INSERT INTO inventory (product_id, warehouse_id, quantity) VALUES (?, ?, 0) ON CONFLICT (product_id, warehouse_id) DO NOTHING',
     productId,
     warehouseId,
   );
 }
 
-export function setProductLocation(db: DB, productId: number, warehouseId: number, locationId: number | null) {
-  ensureInventoryRow(db, productId, warehouseId);
-  db.prepare(
-    `UPDATE inventory SET location_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-     WHERE product_id = ? AND warehouse_id = ?`,
-  ).run(locationId, productId, warehouseId);
+export async function setProductLocation(db: DB, productId: number, warehouseId: number, locationId: number | null) {
+  await ensureInventoryRow(db, productId, warehouseId);
+  await db.run(
+    `UPDATE inventory SET location_id = ?, updated_at = ims_now() WHERE product_id = ? AND warehouse_id = ?`,
+    locationId,
+    productId,
+    warehouseId,
+  );
 }
 
 const fmtQty = (n: number) => String(round3(n));
@@ -146,42 +145,42 @@ function describe(actor: Actor | null, p: ProductRef, tx: TransactionRow): strin
 }
 
 /**
- * Apply one stock movement. Safe to call inside an outer db.transaction()
- * (better-sqlite3 turns nested transactions into savepoints).
+ * Apply one stock movement. Safe to call inside an outer db.tx() (it becomes a savepoint).
  */
-export function applyStockChange(db: DB, actor: Actor | null, input: StockChangeInput): TransactionRow {
+export async function applyStockChange(db: DB, actor: Actor | null, input: StockChangeInput): Promise<TransactionRow> {
   if (!TX_TYPES.includes(input.type)) throw badRequest(`Invalid transaction type ${input.type}`);
   const magnitude = round3(Number(input.quantity));
   if (!Number.isFinite(magnitude) || magnitude <= 0) throw badRequest('Quantity must be greater than zero');
 
-  return db.transaction(() => {
-    const product = getProductRef(db, input.productId);
-    const warehouseId = input.warehouseId ?? getDefaultWarehouseId(db);
-    ensureInventoryRow(db, product.id, warehouseId);
+  return db.tx(async (t) => {
+    const product = await getProductRef(t, input.productId);
+    const warehouseId = input.warehouseId ?? (await getDefaultWarehouseId(t));
+    await ensureInventoryRow(t, product.id, warehouseId);
 
-    const before = getQuantity(db, product.id, warehouseId);
+    const before = await getQuantity(t, product.id, warehouseId);
     const change = isInbound(input.type) ? magnitude : -magnitude;
     const after = round3(before + change);
 
-    if (after < 0 && !(input.allowNegative && negativeStockAllowed(db))) {
+    if (after < 0 && !(input.allowNegative && (await negativeStockAllowed(t)))) {
       throw new InsufficientStockError([
         { productId: product.id, sku: product.sku, name: product.name, available: before, requested: magnitude },
       ]);
     }
 
-    db.prepare(
-      `UPDATE inventory SET quantity = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-       WHERE product_id = ? AND warehouse_id = ?`,
-    ).run(after, product.id, warehouseId);
+    await t.run(
+      `UPDATE inventory SET quantity = ?, updated_at = ims_now() WHERE product_id = ? AND warehouse_id = ?`,
+      after,
+      product.id,
+      warehouseId,
+    );
 
-    const info = db
-      .prepare(
+    const tx = (
+      await t.run(
         `INSERT INTO inventory_transactions
           (product_id, warehouse_id, type, quantity_before, quantity_change, quantity_after, unit_cost,
            reference, notes, source_type, source_id, reversal_of_id, user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         RETURNING *`,
         product.id,
         warehouseId,
         input.type,
@@ -195,12 +194,10 @@ export function applyStockChange(db: DB, actor: Actor | null, input: StockChange
         input.sourceId ?? null,
         input.reversalOfId ?? null,
         actor?.id ?? null,
-      );
-    const tx = db
-      .prepare('SELECT * FROM inventory_transactions WHERE id = ?')
-      .get(info.lastInsertRowid) as TransactionRow;
+      )
+    ).rows[0] as TransactionRow;
 
-    audit(db, actor, {
+    await audit(t, actor, {
       action: `STOCK.${input.type}`,
       entityType: 'inventory_transaction',
       entityId: tx.id,
@@ -210,35 +207,37 @@ export function applyStockChange(db: DB, actor: Actor | null, input: StockChange
       newValue: { quantity: after },
     });
     return tx;
-  })();
+  });
 }
 
 /**
  * Inventory adjustment to a physically counted quantity.
  * Returns null when the count equals the system quantity.
  */
-export function adjustToCount(
+export async function adjustToCount(
   db: DB,
   actor: Actor,
   input: { productId: number; warehouseId?: number; countedQuantity: number; reason: string; reference?: string | null },
-): TransactionRow | null {
+): Promise<TransactionRow | null> {
   const counted = round3(input.countedQuantity);
   if (!Number.isFinite(counted) || counted < 0) throw badRequest('Counted quantity must be zero or greater');
   if (!input.reason?.trim()) throw badRequest('A reason is required for inventory adjustments');
-  const warehouseId = input.warehouseId ?? getDefaultWarehouseId(db);
-  const current = getQuantity(db, input.productId, warehouseId);
-  const delta = round3(counted - current);
-  if (delta === 0) return null;
-  return applyStockChange(db, actor, {
-    productId: input.productId,
-    warehouseId,
-    type: delta > 0 ? 'ADJUSTMENT_PLUS' : 'ADJUSTMENT_MINUS',
-    quantity: Math.abs(delta),
-    reference: input.reference ?? null,
-    notes: input.reason,
-    sourceType: 'ADJUSTMENT',
-    // An adjustment to a physical count may correct an erroneous negative balance.
-    allowNegative: true,
+  return db.tx(async (t) => {
+    const warehouseId = input.warehouseId ?? (await getDefaultWarehouseId(t));
+    const current = await getQuantity(t, input.productId, warehouseId);
+    const delta = round3(counted - current);
+    if (delta === 0) return null;
+    return applyStockChange(t, actor, {
+      productId: input.productId,
+      warehouseId,
+      type: delta > 0 ? 'ADJUSTMENT_PLUS' : 'ADJUSTMENT_MINUS',
+      quantity: Math.abs(delta),
+      reference: input.reference ?? null,
+      notes: input.reason,
+      sourceType: 'ADJUSTMENT',
+      // An adjustment to a physical count may correct an erroneous negative balance.
+      allowNegative: true,
+    });
   });
 }
 
@@ -246,17 +245,15 @@ export function adjustToCount(
  * Reverse a transaction by posting an opposite adjustment. The original row is
  * never modified, so the audit trail stays intact.
  */
-export function reverseTransaction(db: DB, actor: Actor, transactionId: number, reason?: string): TransactionRow {
-  return db.transaction(() => {
-    const original = db.prepare('SELECT * FROM inventory_transactions WHERE id = ?').get(transactionId) as
-      | TransactionRow
-      | undefined;
+export async function reverseTransaction(db: DB, actor: Actor, transactionId: number, reason?: string): Promise<TransactionRow> {
+  return db.tx(async (t) => {
+    const original = await t.get<TransactionRow>('SELECT * FROM inventory_transactions WHERE id = ?', transactionId);
     if (!original) throw notFound('Transaction not found');
     if (original.reversal_of_id) throw badRequest('A reversal cannot itself be reversed');
-    const already = db.prepare('SELECT id FROM inventory_transactions WHERE reversal_of_id = ?').get(transactionId);
+    const already = await t.get('SELECT id FROM inventory_transactions WHERE reversal_of_id = ?', transactionId);
     if (already) throw badRequest('This transaction has already been reversed');
 
-    return applyStockChange(db, actor, {
+    return applyStockChange(t, actor, {
       productId: original.product_id,
       warehouseId: original.warehouse_id,
       type: original.quantity_change > 0 ? 'ADJUSTMENT_MINUS' : 'ADJUSTMENT_PLUS',
@@ -267,5 +264,5 @@ export function reverseTransaction(db: DB, actor: Actor, transactionId: number, 
       sourceId: original.id,
       reversalOfId: original.id,
     });
-  })();
+  });
 }

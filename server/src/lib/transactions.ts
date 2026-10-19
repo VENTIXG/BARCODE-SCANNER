@@ -41,7 +41,7 @@ export const TX_SELECT = /* sql */ `
 
 export function buildTxWhere(f: TxFilters) {
   const where: string[] = [];
-  const params: Record<string, unknown> = {};
+  const params: Record<string, string | number> = {};
   if (f.from) (where.push('t.created_at >= @from'), (params.from = f.from));
   if (f.to) (where.push('t.created_at < @to'), (params.to = f.to));
   if (f.types) {
@@ -55,20 +55,20 @@ export function buildTxWhere(f: TxFilters) {
     params.q = f.q;
     params.like = `%${escapeLike(f.q)}%`;
     where.push(
-      `(p.sku = @q OR p.barcode = @q OR p.name LIKE @like ESCAPE '\\' OR p.sku LIKE @like ESCAPE '\\' OR t.reference LIKE @like ESCAPE '\\' OR t.notes LIKE @like ESCAPE '\\')`,
+      `(p.sku = @q OR p.barcode = @q OR p.name ILIKE @like ESCAPE '\\' OR p.sku ILIKE @like ESCAPE '\\' OR t.reference ILIKE @like ESCAPE '\\' OR t.notes ILIKE @like ESCAPE '\\')`,
     );
   }
   return { where: where.length ? `WHERE ${where.join(' AND ')}` : '', params };
 }
 
-export function listTransactions(db: DB, f: TxFilters, limit: number, offset: number) {
+export async function listTransactions(db: DB, f: TxFilters, limit: number, offset: number) {
   const { where, params } = buildTxWhere(f);
-  const total = db
-    .prepare(`SELECT COUNT(*) FROM inventory_transactions t JOIN products p ON p.id = t.product_id ${where}`)
-    .pluck()
-    .get(params) as number;
-  const rows = db
-    .prepare(`${TX_SELECT} ${where} ORDER BY t.created_at DESC, t.id DESC LIMIT @limit OFFSET @offset`)
-    .all({ ...params, limit, offset });
+  const total =
+    (await db.value<number>(`SELECT COUNT(*) FROM inventory_transactions t JOIN products p ON p.id = t.product_id ${where}`, params)) ?? 0;
+  const rows = await db.all(`${TX_SELECT} ${where} ORDER BY t.created_at DESC, t.id DESC LIMIT @limit OFFSET @offset`, {
+    ...params,
+    limit,
+    offset,
+  });
   return { total, rows };
 }

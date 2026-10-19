@@ -31,9 +31,6 @@ export function tzOffset(query: Record<string, unknown>): number {
   return Number.isFinite(n) && Math.abs(n) <= 14 * 60 ? Math.round(n) : 0;
 }
 
-/** SQLite modifier to shift a UTC timestamp into the client's local time. */
-export const tzModifier = (tz: number) => `${tz >= 0 ? '+' : ''}${tz} minutes`;
-
 /** Optional nullable trimmed string for zod bodies. */
 export const optText = (max = 1000) =>
   z
@@ -44,14 +41,12 @@ export const optText = (max = 1000) =>
 
 export const escapeLike = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
-/** Build an FTS5 prefix query from free text: "abc de" -> "abc"* "de"* */
-export function ftsQuery(text: string): string | null {
-  const tokens = normalizeText(text)
+/** Words of a search text (at most 8), for "every word must match" searches. */
+export function searchWords(text: string): string[] {
+  return normalizeText(text)
     .split(/[^\p{L}\p{N}]+/u)
     .filter(Boolean)
     .slice(0, 8);
-  if (!tokens.length) return null;
-  return tokens.map((t) => `"${t}"*`).join(' ');
 }
 
 /** UTC ISO timestamp of local midnight `daysAgo` days back, for a client tz offset. */

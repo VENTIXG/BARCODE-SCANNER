@@ -52,9 +52,9 @@ export function createApp() {
   app.use(cookieParser());
 
   const api = express.Router();
-  api.get('/health', (_req, res) => {
+  api.get('/health', async (_req, res) => {
     // Public and cheap: used by Docker, the update script and open browsers to detect a new version.
-    getDb().prepare('SELECT 1').get();
+    await getDb().value('SELECT 1');
     res.json({ ok: true, version: appVersion });
   });
   api.use('/auth', authRouter);
@@ -113,8 +113,25 @@ export function createApp() {
 
   app.use('/api', api);
 
-  // Product photos (only for signed-in users).
-  app.use('/uploads', requireAuth, express.static(config.uploadsDir, { maxAge: '7d', fallthrough: false }));
+  // Product photos (only for signed-in users). They are kept in the database, so every
+  // computer and every backup has them; a new photo gets a new name, so they can be cached.
+  app.get('/uploads/:name', requireAuth, async (req, res, next) => {
+    try {
+      const img = await getDb().get<{ content_type: string; data: Uint8Array }>(
+        'SELECT content_type, data FROM product_images WHERE name = ?',
+        String(req.params.name),
+      );
+      if (!img) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Image not found' } });
+      res.set({
+        'Content-Type': img.content_type,
+        'Cache-Control': 'private, max-age=604800, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.send(Buffer.from(img.data));
+    } catch (e) {
+      next(e);
+    }
+  });
 
   // Serve the built React app in production.
   if (fs.existsSync(config.clientDist)) {

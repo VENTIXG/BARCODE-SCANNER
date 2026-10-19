@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import ExcelJS from 'exceljs';
 import { createApp } from '../src/app.js';
-import { getDb } from '../src/db/index.js';
+import { getDb, initDb } from '../src/db/index.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -15,7 +15,7 @@ async function createProduct(body: Record<string, unknown>) {
 }
 
 beforeAll(async () => {
-  getDb();
+  await initDb();
   const res = await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' });
   expect(res.status).toBe(200);
   const u = await admin
@@ -31,8 +31,8 @@ describe('authentication & authorization', () => {
     expect((await request(app).get('/api/products')).status).toBe(401);
   });
 
-  it('stores passwords hashed', () => {
-    const hash = getDb().prepare(`SELECT password_hash FROM users WHERE username = 'worker'`).pluck().get() as string;
+  it('stores passwords hashed', async () => {
+    const hash = (await getDb().value<string>(`SELECT password_hash FROM users WHERE username = 'worker'`))!;
     expect(hash).not.toContain('worker123');
     expect(hash.startsWith('$2')).toBe(true);
   });

@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
-import { getDb } from '../src/db/index.js';
+import { getDb, initDb } from '../src/db/index.js';
 import { runBackup, validateBackupFile } from '../src/lib/backup.js';
 import {
   decryptBackup,
@@ -84,7 +84,7 @@ describe.skipIf(!endpoint)('S3-compatible storage', () => {
   const admin = request.agent(app);
 
   beforeAll(async () => {
-    getDb();
+    await initDb();
     expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
   });
 
@@ -125,16 +125,16 @@ describe.skipIf(!endpoint)('S3-compatible storage', () => {
     expect((await admin.post('/api/backups/offsite/test')).status).toBe(200);
     const files = (await admin.get('/api/backups/offsite/files')).body.data as { name: string }[];
     expect(files.length).toBe(2);
-    const count = () => getDb().prepare('SELECT COUNT(*) FROM products').pluck().get() as number;
-    const before = count();
+    const count = async () => (await getDb().value<number>('SELECT COUNT(*) FROM products')) ?? 0;
+    const before = await count();
     expect((await admin.post('/api/products').send({ sku: 'AFTER-CLOUD', name: 'Made after the cloud copy' })).status).toBe(201);
-    expect(count()).toBe(before + 1);
+    expect(await count()).toBe(before + 1);
     // Remove the local copy: the restore must come from the bucket.
     const local = await downloadRemote(files[0].name);
     fs.rmSync(local);
     const res = await admin.post(`/api/backups/offsite/${files[0].name}/restore`);
     expect(res.status).toBe(200);
-    expect(count()).toBe(before);
+    expect(await count()).toBe(before);
     // Restoring signs everyone out.
     expect((await admin.get('/api/auth/me')).status).toBe(401);
     expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
@@ -150,11 +150,12 @@ describe.skipIf(!endpoint)('S3-compatible storage', () => {
     expect(remote.key.endsWith('.enc')).toBe(true);
     const raw = await new S3Client(creds).getObject(remote.key);
     expect(isEncryptedBackup(raw)).toBe(true);
-    expect(raw.subarray(0, 16).toString()).not.toContain('SQLite');
-    // Download decrypts into a valid database file.
+    // gzip starts with 1f 8b: the stored copy is not the plain backup.
+    expect(raw[0] === 0x1f && raw[1] === 0x8b).toBe(false);
+    // Download decrypts into a valid backup file.
     fs.rmSync(await downloadRemote(b.name));
     const file = await downloadRemote(b.name);
-    expect(() => validateBackupFile(file)).not.toThrow();
+    await expect(validateBackupFile(file)).resolves.toBeUndefined();
     // Without the passphrase the copy cannot be used.
     delete process.env.BACKUP_PASSPHRASE;
     fs.rmSync(file);

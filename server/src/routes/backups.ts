@@ -12,45 +12,45 @@ import { downloadRemote, listRemote, offsiteStatus, syncOffsite, testOffsite } f
 
 export const backupsRouter = Router();
 
-const fileParam = (name: unknown) => {
+const fileParam = async (name: unknown) => {
   const n = String(name ?? '');
   if (!BACKUP_FILE_RE.test(n)) throw badRequest('Invalid backup file name');
-  const file = path.join(backupDir(), n);
+  const file = path.join(await backupDir(), n);
   if (!fs.existsSync(file)) throw notFound('Backup not found');
   return { name: n, file };
 };
 
-backupsRouter.get('/', (_req, res) => {
+backupsRouter.get('/', async (_req, res) => {
   const db = getDb();
   res.json({
     data: {
-      dir: backupDir(db),
+      dir: await backupDir(db),
       defaultDir: defaultBackupDir(),
-      enabled: getSetting('backup_enabled', db) === 'true',
-      keep: Number(getSetting('backup_keep', db)) || 30,
-      lastBackupAt: getSetting('last_backup_at', db) || null,
-      files: listBackups(db),
-      offsite: offsiteStatus(db),
+      enabled: (await getSetting('backup_enabled', db)) === 'true',
+      keep: Number(await getSetting('backup_keep', db)) || 30,
+      lastBackupAt: (await getSetting('last_backup_at', db)) || null,
+      files: await listBackups(db),
+      offsite: await offsiteStatus(db),
     },
   });
 });
 
 backupsRouter.post('/', async (req, res) => {
   const file = await runBackup('manual');
-  audit(getDb(), actorOf(req), { action: 'BACKUP.CREATE', entityType: 'backup', description: `${req.user!.username} created backup ${file.name}.` });
+  await audit(getDb(), actorOf(req), { action: 'BACKUP.CREATE', entityType: 'backup', description: `${req.user!.username} created backup ${file.name}.` });
   res.status(201).json({ data: file });
 });
 
-backupsRouter.get('/:name/download', (req, res) => {
-  const { name, file } = fileParam(req.params.name);
+backupsRouter.get('/:name/download', async (req, res) => {
+  const { name, file } = await fileParam(req.params.name);
   res.download(file, name);
 });
 
 backupsRouter.post('/:name/restore', async (req, res) => {
-  const { name, file } = fileParam(req.params.name);
+  const { name, file } = await fileParam(req.params.name);
   const actor = actorOf(req);
   const result = await restoreFrom(file);
-  audit(getDb(), actor, {
+  await audit(getDb(), actor, {
     action: 'BACKUP.RESTORE',
     entityType: 'backup',
     description: `${actor.username} restored backup ${name}. Previous data saved as ${result.safetyBackup}.`,
@@ -65,7 +65,7 @@ backupsRouter.post('/restore-upload', upload.single('file'), async (req, res) =>
   const actor = actorOf(req);
   try {
     const result = await restoreFrom(req.file.path);
-    audit(getDb(), actor, {
+    await audit(getDb(), actor, {
       action: 'BACKUP.RESTORE',
       entityType: 'backup',
       description: `${actor.username} restored the uploaded backup "${req.file.originalname}". Previous data saved as ${result.safetyBackup}.`,
@@ -86,8 +86,8 @@ backupsRouter.post('/offsite/test', async (_req, res) => {
 backupsRouter.post('/offsite/sync', async (req, res) => {
   const result = await syncOffsite();
   if (result.uploaded.length)
-    audit(getDb(), actorOf(req), { action: 'BACKUP.OFFSITE', entityType: 'backup', description: `${req.user!.username} uploaded ${result.uploaded.join(', ')} to cloud storage.` });
-  res.json({ data: { ...result, offsite: offsiteStatus() } });
+    await audit(getDb(), actorOf(req), { action: 'BACKUP.OFFSITE', entityType: 'backup', description: `${req.user!.username} uploaded ${result.uploaded.join(', ')} to cloud storage.` });
+  res.json({ data: { ...result, offsite: await offsiteStatus() } });
 });
 
 backupsRouter.get('/offsite/files', async (_req, res) => {
@@ -100,7 +100,7 @@ backupsRouter.post('/offsite/:name/restore', async (req, res) => {
   const actor = actorOf(req);
   const file = await downloadRemote(name);
   const result = await restoreFrom(file);
-  audit(getDb(), actor, {
+  await audit(getDb(), actor, {
     action: 'BACKUP.RESTORE',
     entityType: 'backup',
     description: `${actor.username} restored ${name} from cloud storage. Previous data saved as ${result.safetyBackup}.`,

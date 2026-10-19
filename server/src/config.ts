@@ -39,7 +39,14 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   dataDir,
   uploadsDir: path.join(dataDir, 'uploads'),
-  dbFile: process.env.DB_FILE ?? path.join(dataDir, 'inventory.db'),
+  /**
+   * PostgreSQL server: postgres://user:password@host:5432/database (Docker servers, hosted databases).
+   * Empty: PostgreSQL inside the app (PGlite) with its files in pgliteDir. memory:// keeps it in memory (tests).
+   */
+  databaseUrl: process.env.DATABASE_URL?.trim() ?? '',
+  pgliteDir: path.join(dataDir, 'pgdata'),
+  /** SQLite database of versions up to 1.2: copied into PostgreSQL once, then left untouched. */
+  legacyDbFile: process.env.DB_FILE ?? path.join(dataDir, 'inventory.db'),
   jwtSecret: resolveJwtSecret(),
   sessionHours: Number(process.env.SESSION_HOURS ?? 12),
   /** Set COOKIE_SECURE=true when the app is served over HTTPS. */

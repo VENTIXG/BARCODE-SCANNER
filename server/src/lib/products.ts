@@ -1,5 +1,5 @@
-import { getDefaultWarehouseId, normalizeText, type DB } from '../db/index.js';
-import { escapeLike, ftsQuery } from './http.js';
+import { getDefaultWarehouseId, type DB } from '../db/index.js';
+import { escapeLike, searchWords } from './http.js';
 
 export type StockStatus = 'IN_STOCK' | 'LOW_STOCK' | 'OUT_OF_STOCK';
 
@@ -76,21 +76,22 @@ export function serializeProduct(p: ProductRow) {
 }
 export type ProductDTO = ReturnType<typeof serializeProduct>;
 
-export function getProduct(db: DB, id: number, warehouseId = getDefaultWarehouseId(db)): ProductRow | undefined {
-  return db.prepare(`${PRODUCT_SELECT} WHERE p.id = @id`).get({ id, warehouseId }) as ProductRow | undefined;
+export async function getProduct(db: DB, id: number, warehouseId?: number): Promise<ProductRow | undefined> {
+  const wh = warehouseId ?? (await getDefaultWarehouseId(db));
+  return db.get<ProductRow>(`${PRODUCT_SELECT} WHERE p.id = @id`, { id, warehouseId: wh });
 }
 
 /** Exact lookup by barcode or SKU — used by the barcode scanner (index seek). */
-export function lookupByCode(db: DB, code: string, warehouseId = getDefaultWarehouseId(db)): ProductRow[] {
+export async function lookupByCode(db: DB, code: string, warehouseId?: number): Promise<ProductRow[]> {
   const c = code.trim();
   if (!c) return [];
-  return db
-    .prepare(
-      `${PRODUCT_SELECT}
-       WHERE p.id IN (SELECT id FROM products WHERE barcode = @code UNION SELECT id FROM products WHERE sku = @code)
-       ORDER BY (p.status = 'ACTIVE') DESC, (p.barcode = @code) DESC, p.name`,
-    )
-    .all({ code: c, warehouseId }) as ProductRow[];
+  const wh = warehouseId ?? (await getDefaultWarehouseId(db));
+  return db.all<ProductRow>(
+    `${PRODUCT_SELECT}
+     WHERE p.id IN (SELECT id FROM products WHERE barcode = @code UNION SELECT id FROM products WHERE sku = @code)
+     ORDER BY (p.status = 'ACTIVE') DESC, COALESCE(p.barcode = @code, false) DESC, lower(p.name)`,
+    { code: c, warehouseId: wh },
+  );
 }
 
 export interface ProductFilters {
@@ -106,19 +107,20 @@ export interface ProductFilters {
 /** Builds WHERE clause + params shared by list, export and search. */
 export function buildProductWhere(f: ProductFilters, warehouseId: number) {
   const where: string[] = [];
-  const params: Record<string, unknown> = { warehouseId };
+  const params: Record<string, string | number> = { warehouseId };
   if (f.q) {
     const q = f.q.trim();
     params.q = q;
-    params.like = `%${escapeLike(normalizeText(q))}%`;
-    const fts = ftsQuery(q);
+    params.like = `%${escapeLike(q)}%`;
     const parts = ['p.sku = @q', 'p.barcode = @q'];
-    if (fts) {
-      params.fts = fts;
-      parts.push('p.id IN (SELECT rowid FROM products_fts WHERE products_fts MATCH @fts)');
+    // Every word must appear in name, SKU, barcode or description (accents and case ignored).
+    const words = searchWords(q);
+    if (words.length) {
+      words.forEach((w, i) => (params[`w${i}`] = `%${escapeLike(w)}%`));
+      parts.push(`(${words.map((_, i) => `p.search_text LIKE ims_norm(@w${i}) ESCAPE '\\'`).join(' AND ')})`);
     }
-    parts.push(`p.category_id IN (SELECT id FROM categories WHERE ims_norm(name) LIKE @like ESCAPE '\\')`);
-    parts.push(`p.supplier_id IN (SELECT id FROM suppliers WHERE ims_norm(name) LIKE @like ESCAPE '\\')`);
+    parts.push(`p.category_id IN (SELECT id FROM categories WHERE ims_norm(name::text) LIKE ims_norm(@like) ESCAPE '\\')`);
+    parts.push(`p.supplier_id IN (SELECT id FROM suppliers WHERE ims_norm(name::text) LIKE ims_norm(@like) ESCAPE '\\')`);
     where.push(`(${parts.join(' OR ')})`);
   }
   if (f.categoryId) {
@@ -150,11 +152,11 @@ export function buildProductWhere(f: ProductFilters, warehouseId: number) {
 }
 
 const SORTS: Record<string, string> = {
-  name: 'p.name COLLATE NOCASE',
+  name: 'lower(p.name)',
   sku: 'p.sku',
   barcode: 'p.barcode',
-  category: 'c.name COLLATE NOCASE',
-  supplier: 's.name COLLATE NOCASE',
+  category: 'c.name',
+  supplier: 's.name',
   quantity: 'COALESCE(i.quantity, 0)',
   minStock: 'p.min_stock',
   location: 'l.code',
@@ -170,26 +172,28 @@ export function orderBy(sort: string | undefined, dir: string | undefined, hasQu
   const col = sort && SORTS[sort];
   if (col) return `ORDER BY ${col} ${direction}, p.id`;
   // Relevance: exact SKU/barcode matches first.
-  if (hasQuery) return `ORDER BY (p.sku = @q OR p.barcode = @q) DESC, p.name COLLATE NOCASE`;
-  return 'ORDER BY p.name COLLATE NOCASE, p.id';
+  if (hasQuery) return `ORDER BY COALESCE(p.sku = @q OR p.barcode = @q, false) DESC, lower(p.name), p.id`;
+  return 'ORDER BY lower(p.name), p.id';
 }
 
-export function listProducts(
+export async function listProducts(
   db: DB,
   f: ProductFilters & { sort?: string; dir?: string },
   page: { limit: number; offset: number },
-  warehouseId = getDefaultWarehouseId(db),
+  warehouseId?: number,
 ) {
-  const { where, params } = buildProductWhere(f, warehouseId);
+  const wh = warehouseId ?? (await getDefaultWarehouseId(db));
+  const { where, params } = buildProductWhere(f, wh);
   const base = `FROM products p
     LEFT JOIN categories c ON c.id = p.category_id
     LEFT JOIN suppliers s ON s.id = p.supplier_id
     LEFT JOIN inventory i ON i.product_id = p.id AND i.warehouse_id = @warehouseId
     LEFT JOIN warehouse_locations l ON l.id = i.location_id
     ${where}`;
-  const total = db.prepare(`SELECT COUNT(*) ${base}`).pluck().get(params) as number;
-  const rows = db
-    .prepare(`${PRODUCT_SELECT} ${where} ${orderBy(f.sort, f.dir, Boolean(f.q))} LIMIT @limit OFFSET @offset`)
-    .all({ ...params, limit: page.limit, offset: page.offset }) as ProductRow[];
+  const total = (await db.value<number>(`SELECT COUNT(*) ${base}`, params)) ?? 0;
+  const rows = await db.all<ProductRow>(
+    `${PRODUCT_SELECT} ${where} ${orderBy(f.sort, f.dir, Boolean(f.q))} LIMIT @limit OFFSET @offset`,
+    { ...params, limit: page.limit, offset: page.offset },
+  );
   return { total, rows };
 }

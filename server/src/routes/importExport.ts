@@ -61,9 +61,9 @@ importRouter.get('/template', async (_req, res) => {
   await sendWorkbook(res, wb, 'product_import_template');
 });
 
-importRouter.post('/products/validate', (req, res) => {
+importRouter.post('/products/validate', async (req, res) => {
   const rows = pickFields(rowsSchema.parse(req.body?.rows));
-  const results = validateRows(getDb(), rows);
+  const results = await validateRows(getDb(), rows);
   const summary = {
     total: results.length,
     new: results.filter((r) => r.status === 'new').length,
@@ -74,11 +74,11 @@ importRouter.post('/products/validate', (req, res) => {
   res.json({ data: { summary, rows: results.map(({ data: _data, ...r }) => r) } });
 });
 
-importRouter.post('/products/commit', (req, res) => {
+importRouter.post('/products/commit', async (req, res) => {
   const rows = pickFields(rowsSchema.parse(req.body?.rows));
   const options = optionsSchema.parse(req.body?.options ?? {});
   const fileName = typeof req.body?.fileName === 'string' ? req.body.fileName.slice(0, 200) : undefined;
-  const summary = importRows(getDb(), actorOf(req), rows, options, fileName);
+  const summary = await importRows(getDb(), actorOf(req), rows, options, fileName);
   res.json({ data: summary });
 });
 
@@ -86,8 +86,8 @@ importRouter.post('/products/commit', (req, res) => {
 
 export const exportRouter = Router();
 
-function productRows(where: string, params: Record<string, unknown>, order = 'ORDER BY p.name COLLATE NOCASE') {
-  return getDb().prepare(`${PRODUCT_SELECT} ${where} ${order}`).all(params) as ProductRow[];
+function productRows(where: string, params: Record<string, string | number>, order = 'ORDER BY lower(p.name), p.id') {
+  return getDb().all<ProductRow>(`${PRODUCT_SELECT} ${where} ${order}`, params);
 }
 
 const toProductSheetRow = (p: ProductRow) => ({
@@ -144,7 +144,7 @@ const toInventoryRow = (p: ProductRow) => ({
 
 /** Products (import-compatible layout). Honours the same filters as the product list. */
 exportRouter.get('/products', async (req, res) => {
-  const wh = getDefaultWarehouseId();
+  const wh = await getDefaultWarehouseId();
   const q = req.query as Record<string, unknown>;
   const { where, params } = buildProductWhere(
     {
@@ -159,13 +159,13 @@ exportRouter.get('/products', async (req, res) => {
     wh,
   );
   const wb = newWorkbook();
-  addSheet(wb, 'Products', PRODUCT_COLUMNS, productRows(where, params, orderBy(str(q.sort), str(q.dir), Boolean(str(q.q)))).map(toProductSheetRow));
+  addSheet(wb, 'Products', PRODUCT_COLUMNS, (await productRows(where, params, orderBy(str(q.sort), str(q.dir), Boolean(str(q.q))))).map(toProductSheetRow));
   await sendWorkbook(res, wb, 'products');
 });
 
 exportRouter.get('/inventory', async (_req, res) => {
-  const wh = getDefaultWarehouseId();
-  const rows = productRows(`WHERE p.status = 'ACTIVE'`, { warehouseId: wh }, 'ORDER BY l.code IS NULL, l.code, p.name COLLATE NOCASE');
+  const wh = await getDefaultWarehouseId();
+  const rows = await productRows(`WHERE p.status = 'ACTIVE'`, { warehouseId: wh }, 'ORDER BY l.code IS NULL, l.code, lower(p.name), p.id');
   const wb = newWorkbook();
   const ws = addSheet(wb, 'Inventory', INVENTORY_COLUMNS, rows.map(toInventoryRow));
   const totalValue = rows.reduce((s, p) => s + Math.max(p.quantity, 0) * p.purchase_price, 0);
@@ -175,11 +175,11 @@ exportRouter.get('/inventory', async (_req, res) => {
 });
 
 exportRouter.get('/low-stock', async (_req, res) => {
-  const wh = getDefaultWarehouseId();
-  const rows = productRows(
+  const wh = await getDefaultWarehouseId();
+  const rows = await productRows(
     `WHERE p.status = 'ACTIVE' AND COALESCE(i.quantity, 0) <= p.min_stock`,
     { warehouseId: wh },
-    'ORDER BY (COALESCE(i.quantity,0) <= 0) DESC, s.name COLLATE NOCASE, p.name COLLATE NOCASE',
+    'ORDER BY (COALESCE(i.quantity,0) <= 0) DESC, s.name NULLS FIRST, lower(p.name), p.id',
   );
   const wb = newWorkbook();
   addSheet(
@@ -219,9 +219,7 @@ exportRouter.get('/transactions', async (req, res) => {
   if (preset === 'stock-in') filters.types = ['STOCK_IN'];
   if (preset === 'stock-out') filters.types = ['STOCK_OUT'];
   const { where, params } = buildTxWhere(filters);
-  const rows = getDb()
-    .prepare(`${TX_SELECT} ${where} ORDER BY t.created_at DESC, t.id DESC LIMIT 200000`)
-    .all(params) as Record<string, unknown>[];
+  const rows = await getDb().all(`${TX_SELECT} ${where} ORDER BY t.created_at DESC, t.id DESC LIMIT 200000`, params);
   const wb = newWorkbook();
   addSheet(
     wb,
@@ -257,8 +255,7 @@ exportRouter.get('/documents/:kind', async (req, res) => {
   const where: string[] = [];
   if (from) where.push(`d.${r ? 'receipt_date' : 'dispatch_date'} >= @from`);
   if (to) where.push(`d.${r ? 'receipt_date' : 'dispatch_date'} <= @to`);
-  const rows = getDb()
-    .prepare(
+  const rows = await getDb().all(
       r
         ? `SELECT d.receipt_number AS number, d.receipt_date AS date, d.status, s.name AS party, d.invoice_number AS ref,
                   p.sku, p.barcode, p.name, it.quantity, p.unit, it.unit_cost AS price, u.username
@@ -270,8 +267,8 @@ exportRouter.get('/documents/:kind', async (req, res) => {
            FROM stock_dispatch_items it JOIN stock_dispatches d ON d.id = it.dispatch_id JOIN products p ON p.id = it.product_id
            LEFT JOIN users u ON u.id = d.created_by
            ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY d.dispatch_date DESC, d.id DESC, it.id`,
-    )
-    .all({ from, to }) as Record<string, unknown>[];
+      { from: from ?? null, to: to ?? null },
+  );
   const wb = newWorkbook();
   addSheet(
     wb,
@@ -300,8 +297,8 @@ exportRouter.get('/documents/:kind', async (req, res) => {
 exportRouter.get('/grouped/:by', async (req, res) => {
   const by = req.params.by;
   if (by !== 'category' && by !== 'supplier') throw badRequest('Group by category or supplier');
-  const wh = getDefaultWarehouseId();
-  const rows = productRows('', { warehouseId: wh }, `ORDER BY ${by === 'category' ? 'c.name' : 's.name'} COLLATE NOCASE, p.name COLLATE NOCASE`);
+  const wh = await getDefaultWarehouseId();
+  const rows = await productRows('', { warehouseId: wh }, `ORDER BY ${by === 'category' ? 'c.name' : 's.name'} NULLS FIRST, lower(p.name), p.id`);
   const groups = new Map<string, ProductRow[]>();
   for (const p of rows) {
     const key = (by === 'category' ? p.category_name : p.supplier_name) ?? (by === 'category' ? 'Uncategorised' : 'No supplier');

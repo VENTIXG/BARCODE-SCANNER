@@ -3,11 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import Database from 'better-sqlite3';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { getDb, migrate } from '../src/db/index.js';
-import { migrations } from '../src/db/migrations.js';
+import { connect, initDb, migrate } from '../src/db/index.js';
+import { readBackupFile } from '../src/db/dump.js';
+import { latestSchemaVersion, migrations } from '../src/db/migrations.js';
 
 let base = '';
 let server: http.Server;
@@ -32,7 +32,7 @@ const api = (method: string, url: string, body?: unknown, who = cookie) =>
   });
 
 beforeAll(async () => {
-  getDb();
+  await initDb();
   server = http.createServer(createApp());
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -151,23 +151,28 @@ describe('real-time events', () => {
 });
 
 describe('migrations never lose data', () => {
-  it('a failing migration rolls back and leaves a copy from before the upgrade', () => {
+  it('a failing migration rolls back and leaves a copy from before the upgrade', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-'));
-    const file = path.join(dir, 'test.db');
-    const db = new Database(file);
-    db.pragma('foreign_keys = ON');
-    migrate(db, migrations, dir); // fresh database: no copy needed
-    db.prepare("INSERT INTO settings (key, value) VALUES ('probe', 'keep-me')").run();
-    const bad = [...migrations, { version: 99, name: 'broken', sql: 'CREATE TABLE should_not_exist (a INTEGER); INSERT INTO missing_table VALUES (1);' }];
-    expect(() => migrate(db, bad, dir)).toThrow();
-    const copies = fs.readdirSync(dir).filter((f) => f.includes('before-migrate-v99'));
-    expect(copies).toHaveLength(1);
-    expect(db.prepare("SELECT value FROM settings WHERE key = 'probe'").pluck().get()).toBe('keep-me');
-    expect(db.prepare("SELECT COUNT(*) FROM sqlite_master WHERE name = 'should_not_exist'").pluck().get()).toBe(0);
-    expect(db.prepare('SELECT MAX(version) FROM schema_migrations').pluck().get()).toBe(migrations[migrations.length - 1].version);
-    const copy = new Database(path.join(dir, copies[0]), { readonly: true });
-    expect(copy.prepare("SELECT value FROM settings WHERE key = 'probe'").pluck().get()).toBe('keep-me');
-    copy.close();
-    db.close();
+    const db = await connect({ url: 'memory://' });
+    try {
+      await migrate(db, migrations, dir); // fresh database: no copy needed
+      expect(fs.readdirSync(dir)).toEqual([]);
+      await db.run("INSERT INTO settings (key, value) VALUES ('probe', 'keep-me')");
+      const bad = [...migrations, { version: 999, name: 'broken', sql: 'CREATE TABLE should_not_exist (a INTEGER); INSERT INTO missing_table VALUES (1);' }];
+      await expect(migrate(db, bad, dir)).rejects.toThrow();
+      const copies = fs.readdirSync(dir).filter((f) => f.includes('before-migrate-v999'));
+      expect(copies).toHaveLength(1);
+      expect(await db.value("SELECT value FROM settings WHERE key = 'probe'")).toBe('keep-me');
+      expect(await db.value("SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'should_not_exist'")).toBe(0);
+      expect(await db.value('SELECT MAX(version) FROM schema_migrations')).toBe(latestSchemaVersion);
+      const copy = await readBackupFile(path.join(dir, copies[0]));
+      expect(copy.schema).toBe(latestSchemaVersion);
+      expect(copy.tables.settings.find((r) => r.key === 'probe')?.value).toBe('keep-me');
+      // An older program refuses a database that a newer one has upgraded.
+      await db.run("INSERT INTO schema_migrations (version, name) VALUES (998, 'from_the_future')");
+      await expect(migrate(db, migrations, dir)).rejects.toThrow(/upgraded by a newer version/);
+    } finally {
+      await db.close();
+    }
   });
 });

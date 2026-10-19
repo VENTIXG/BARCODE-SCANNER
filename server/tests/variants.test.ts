@@ -2,7 +2,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/app.js';
-import { getDb } from '../src/db/index.js';
+import { initDb } from '../src/db/index.js';
 
 let base = '';
 let server: http.Server;
@@ -16,7 +16,7 @@ const api = (method: string, url: string, body?: unknown) =>
   });
 
 beforeAll(async () => {
-  getDb();
+  await initDb();
   server = http.createServer(createApp());
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

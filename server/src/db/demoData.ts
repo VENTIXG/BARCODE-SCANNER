@@ -8,7 +8,7 @@ import bcrypt from 'bcryptjs';
 import { getDefaultWarehouseId, type DB } from './index.js';
 import type { Actor } from '../lib/audit.js';
 import { findOrCreateLocation } from '../lib/locations.js';
-import { applyStockChange, adjustToCount, getQuantity, setProductLocation, type TxType } from '../lib/stock.js';
+import { applyStockChange, adjustToCount, setProductLocation, type TxType } from '../lib/stock.js';
 
 export interface DemoStats {
   products: number;
@@ -17,7 +17,12 @@ export interface DemoStats {
   dispatches: number;
 }
 
-export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {}): DemoStats {
+/** Everything in one transaction: on any error nothing is kept. */
+export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {}): Promise<DemoStats> {
+  return db.tx((t) => seed(t, opts));
+}
+
+async function seed(db: DB, opts: { keepExistingUsers?: boolean }): Promise<DemoStats> {
   // Deterministic pseudo-random generator so every seed looks the same.
   let seed = 20260928;
   const rand = () => {
@@ -44,30 +49,33 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
   ];
   for (const u of users) {
     // From the app (opts.keepExistingUsers) existing accounts and passwords are left untouched.
-    db.prepare(
+    await db.run(
       opts.keepExistingUsers
-        ? `INSERT OR IGNORE INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?)`
+        ? `INSERT INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?) ON CONFLICT (username) DO NOTHING`
         : `INSERT INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?)
-       ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, role = excluded.role, full_name = excluded.full_name`,
-    ).run(u.username, u.full_name, u.role, bcrypt.hashSync(u.password, 10));
+       ON CONFLICT (username) DO UPDATE SET password_hash = excluded.password_hash, role = excluded.role, full_name = excluded.full_name`,
+      u.username, u.full_name, u.role, await bcrypt.hash(u.password, 10),
+    );
   }
-  const actorFor = (username: string): Actor => {
-    const u = db.prepare('SELECT id, username, full_name, role FROM users WHERE username = ?').get(username) as {
-      id: number; username: string; full_name: string; role: Actor['role'];
-    };
+  const actorFor = async (username: string): Promise<Actor> => {
+    const u = (await db.get<{ id: number; username: string; full_name: string; role: Actor['role'] }>(
+      'SELECT id, username, full_name, role FROM users WHERE username = ?',
+      username,
+    ))!;
     return { id: u.id, username: u.username, fullName: u.full_name, role: u.role, ip: '127.0.0.1' };
   };
-  const admin = actorFor('admin');
-  const manager = actorFor('manager');
-  const staff = [actorFor('warehouse1'), actorFor('warehouse2')];
+  const admin = await actorFor('admin');
+  const manager = await actorFor('manager');
+  const staff = [await actorFor('warehouse1'), await actorFor('warehouse2')];
 
-  db.prepare(`UPDATE settings SET value = 'Demo Trading S.A.' WHERE key = 'company_name'`).run();
-  db.prepare(`UPDATE warehouses SET name = 'Κεντρική Αποθήκη', address = 'Βιομηχανική Περιοχή Σίνδου, Θεσσαλονίκη' WHERE is_default = 1`).run();
-  const wh = getDefaultWarehouseId(db);
+  await db.run(`UPDATE settings SET value = 'Demo Trading S.A.' WHERE key = 'company_name'`);
+  await db.run(`UPDATE warehouses SET name = 'Κεντρική Αποθήκη', address = 'Βιομηχανική Περιοχή Σίνδου, Θεσσαλονίκη' WHERE is_default = 1`);
+  const wh = await getDefaultWarehouseId(db);
 
   // ---- Catalog -------------------------------------------------------------------
   const categories = ['Beverages', 'Food', 'Cleaning', 'Office Supplies', 'Electronics', 'Tools', 'Packaging', 'Personal Care'];
-  const catId = new Map(categories.map((c) => [c, Number(db.prepare('INSERT INTO categories (name) VALUES (?)').run(c).lastInsertRowid)]));
+  const catId = new Map<string, number>();
+  for (const c of categories) catId.set(c, (await db.run('INSERT INTO categories (name) VALUES (?) RETURNING id', c)).rows[0].id);
 
   const suppliers = [
     { name: 'Αφοί Παπαδόπουλοι Α.Ε.', contact: 'Γιώργος Παπαδόπουλος', phone: '2310 555 100', email: 'orders@papadopoulos.gr', vat: 'EL094123456' },
@@ -77,15 +85,13 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
     { name: 'TechSource Europe', contact: 'Mark Weber', phone: '+49 30 1234 567', email: 'eu@techsource.com', vat: 'DE123456789' },
     { name: 'PackIt Solutions', contact: 'Kostas Lamprou', phone: '2410 333 111', email: 'hello@packit.gr', vat: 'EL099887766' },
   ];
-  const supId = new Map(
-    suppliers.map((s) => [
+  const supId = new Map<string, number>();
+  for (const s of suppliers)
+    supId.set(
       s.name,
-      Number(
-        db.prepare('INSERT INTO suppliers (name, contact_name, phone, email, vat_number) VALUES (?, ?, ?, ?, ?)')
-          .run(s.name, s.contact, s.phone, s.email, s.vat).lastInsertRowid,
-      ),
-    ]),
-  );
+      (await db.run('INSERT INTO suppliers (name, contact_name, phone, email, vat_number) VALUES (?, ?, ?, ?, ?) RETURNING id',
+        s.name, s.contact, s.phone, s.email, s.vat)).rows[0].id,
+    );
 
   type Def = [name: string, category: string, supplier: string, unit: string, cost: number, margin: number, min: number, velocity: number];
   const S = suppliers.map((s) => s.name);
@@ -180,27 +186,26 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
   const dayMs = 86_400_000;
   const startDate = Date.now() - DAYS * dayMs;
 
-  db.transaction(() => {
-    defs.forEach(([name, category, supplier, unit, cost, margin, min, velocity], idx) => {
-      counters[category] = (counters[category] ?? 0) + 1;
-      const sku = `${catPrefix[category]}-${String(counters[category]).padStart(3, '0')}`;
-      const barcode = ean13(`520${String(1000 + idx).padStart(4, '0')}${String(int(10000, 99999))}`);
-      const price = Math.round(cost * margin * 100) / 100;
-      const id = Number(
-        db.prepare(
-          `INSERT INTO products (sku, barcode, name, category_id, supplier_id, unit, min_stock, purchase_price, selling_price, status, created_by, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
-        ).run(sku, barcode, name, catId.get(category), supId.get(supplier), unit, min, cost, price, admin.id,
-          new Date(startDate - dayMs).toISOString(), new Date(startDate - dayMs).toISOString()).lastInsertRowid,
-      );
-      const zone = catZone[category];
-      const loc = findOrCreateLocation(db, wh, `${zone}-${String(int(1, 6)).padStart(2, '0')}-${String(int(1, 5)).padStart(2, '0')}`);
-      setProductLocation(db, id, wh, loc);
-      products.push({ id, sku, cost, price, min, velocity, supplier });
-    });
-    // A couple of inactive / discontinued products
-    db.prepare(`UPDATE products SET status = 'INACTIVE' WHERE sku IN ('OFF-010', 'ELC-003')`).run();
-  })();
+  for (const [idx, [name, category, supplier, unit, cost, margin, min, velocity]] of defs.entries()) {
+    counters[category] = (counters[category] ?? 0) + 1;
+    const sku = `${catPrefix[category]}-${String(counters[category]).padStart(3, '0')}`;
+    const barcode = ean13(`520${String(1000 + idx).padStart(4, '0')}${String(int(10000, 99999))}`);
+    const price = Math.round(cost * margin * 100) / 100;
+    const id: number = (
+      await db.run(
+        `INSERT INTO products (sku, barcode, name, category_id, supplier_id, unit, min_stock, purchase_price, selling_price, status, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?) RETURNING id`,
+        sku, barcode, name, catId.get(category), supId.get(supplier), unit, min, cost, price, admin.id,
+        new Date(startDate - dayMs).toISOString(), new Date(startDate - dayMs).toISOString(),
+      )
+    ).rows[0].id;
+    const zone = catZone[category];
+    const loc = await findOrCreateLocation(db, wh, `${zone}-${String(int(1, 6)).padStart(2, '0')}-${String(int(1, 5)).padStart(2, '0')}`);
+    await setProductLocation(db, id, wh, loc);
+    products.push({ id, sku, cost, price, min, velocity, supplier });
+  }
+  // A couple of inactive / discontinued products
+  await db.run(`UPDATE products SET status = 'INACTIVE' WHERE sku IN ('OFF-010', 'ELC-003')`);
 
   // ---- Movements ----------------------------------------------------------------
   const seq = new Map<string, number>();
@@ -212,12 +217,17 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
   };
   const customers = ['Super Market Κρήτη', 'Mini Market Ο Γιάννης', 'Cafe Lumiere', 'Hotel Aegean Blue', 'Office Center Α.Ε.', 'e-shop order', 'Ταβέρνα Το Λιμάνι', 'Φαρμακείο Νικολάου'];
 
+  // Quantities on hand, kept here so the simulation does not have to ask the database.
+  const onHand = new Map<number, number>();
+  const getQuantity = (productId: number) => onHand.get(productId) ?? 0;
+  // Transactions are back-dated in one statement at the end.
+  const dates: { id: number; at: string }[] = [];
+
   /** Post a ledger transaction and back-date it to `when`. */
-  function post(actor: Actor, when: Date, input: Parameters<typeof applyStockChange>[2]) {
-    const tx = applyStockChange(db, actor, input);
-    const iso = when.toISOString();
-    db.prepare('UPDATE inventory_transactions SET created_at = ? WHERE id = ?').run(iso, tx.id);
-    db.prepare('UPDATE audit_logs SET created_at = ? WHERE entity_type = ? AND entity_id = ?').run(iso, 'inventory_transaction', tx.id);
+  async function post(actor: Actor, when: Date, input: Parameters<typeof applyStockChange>[2]) {
+    const tx = await applyStockChange(db, actor, input);
+    onHand.set(tx.product_id, tx.quantity_after);
+    dates.push({ id: tx.id, at: when.toISOString() });
     return tx;
   }
 
@@ -235,11 +245,11 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
   };
   const ymd = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
-  db.transaction(() => {
+  {
     // Opening balance
     startDay(0);
     for (const p of products) {
-      post(admin, tick(), { productId: p.id, warehouseId: wh, type: 'INITIAL_STOCK', quantity: Math.max(1, Math.round(p.min * (2 + rand() * 2))), notes: 'Opening balance', sourceType: 'IMPORT', unitCost: p.cost });
+      await post(admin, tick(), { productId: p.id, warehouseId: wh, type: 'INITIAL_STOCK', quantity: Math.max(1, Math.round(p.min * (2 + rand() * 2))), notes: 'Opening balance', sourceType: 'IMPORT', unitCost: p.cost });
     }
 
     for (let day = 1; day < DAYS; day++) {
@@ -248,7 +258,7 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
 
       // Receipts: restock products below ~1.5x min, grouped per supplier, on Mon/Wed/Fri
       if ([1, 3, 5].includes(weekday)) {
-        const needs = products.filter((p) => getQuantity(db, p.id, wh) < p.min * 1.5 && rand() < 0.85);
+        const needs = products.filter((p) => getQuantity(p.id) < p.min * 1.5 && rand() < 0.85);
         const bySupplier = new Map<string, P[]>();
         for (const p of needs) bySupplier.set(p.supplier, [...(bySupplier.get(p.supplier) ?? []), p]);
         for (const [supplier, list] of bySupplier) {
@@ -257,15 +267,16 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
           const invoice = `ΤΔΑ ${int(1000, 9999)}`;
           const actor = pick([...staff, manager]);
           const lines = list.map((p) => ({ p, qty: Math.max(1, Math.round(p.min * (2 + rand() * 1.5))) }));
-          const rid = Number(
-            db.prepare(
+          const rid: number = (
+            await db.run(
               `INSERT INTO stock_receipts (receipt_number, warehouse_id, supplier_id, invoice_number, receipt_date, status, notes, total_quantity, total_value, created_by, confirmed_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 'CONFIRMED', NULL, ?, ?, ?, ?, ?, ?)`,
-            ).run(number, wh, supId.get(supplier), invoice, ymd(when), lines.reduce((s, l) => s + l.qty, 0), lines.reduce((s, l) => s + l.qty * l.p.cost, 0), actor.id, when.toISOString(), when.toISOString(), when.toISOString()).lastInsertRowid,
-          );
+               VALUES (?, ?, ?, ?, ?, 'CONFIRMED', NULL, ?, ?, ?, ?, ?, ?) RETURNING id`,
+              number, wh, supId.get(supplier), invoice, ymd(when), lines.reduce((s, l) => s + l.qty, 0), lines.reduce((s, l) => s + l.qty * l.p.cost, 0), actor.id, when.toISOString(), when.toISOString(), when.toISOString(),
+            )
+          ).rows[0].id;
           for (const l of lines) {
-            db.prepare('INSERT INTO stock_receipt_items (receipt_id, product_id, quantity, unit_cost) VALUES (?, ?, ?, ?)').run(rid, l.p.id, l.qty, l.p.cost);
-            post(actor, when, { productId: l.p.id, warehouseId: wh, type: 'STOCK_IN', quantity: l.qty, unitCost: l.p.cost, reference: `${number} / ${invoice}`, sourceType: 'RECEIPT', sourceId: rid });
+            await db.run('INSERT INTO stock_receipt_items (receipt_id, product_id, quantity, unit_cost) VALUES (?, ?, ?, ?)', rid, l.p.id, l.qty, l.p.cost);
+            await post(actor, when, { productId: l.p.id, warehouseId: wh, type: 'STOCK_IN', quantity: l.qty, unitCost: l.p.cost, reference: `${number} / ${invoice}`, sourceType: 'RECEIPT', sourceId: rid });
           }
         }
       }
@@ -277,7 +288,7 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
         const lines = new Map<number, { p: P; qty: number }>();
         for (let k = 0; k < int(2, 7); k++) {
           const p = pick(products);
-          const avail = getQuantity(db, p.id, wh) - (lines.get(p.id)?.qty ?? 0);
+          const avail = getQuantity(p.id) - (lines.get(p.id)?.qty ?? 0);
           const qty = Math.min(avail, Math.max(1, Math.round(p.velocity * (0.3 + rand()) * (0.8 + day / DAYS))));
           if (qty >= 1) lines.set(p.id, { p, qty: (lines.get(p.id)?.qty ?? 0) + qty });
         }
@@ -287,15 +298,16 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
         const ref = `ΔΑ-${int(10000, 99999)}`;
         const actor = pick(staff);
         const list = [...lines.values()];
-        const did = Number(
-          db.prepare(
+        const did: number = (
+          await db.run(
             `INSERT INTO stock_dispatches (dispatch_number, warehouse_id, customer_name, reference, dispatch_date, status, total_quantity, total_value, created_by, confirmed_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?)`,
-          ).run(number, wh, customer, ref, ymd(when), list.reduce((s, l) => s + l.qty, 0), list.reduce((s, l) => s + l.qty * l.p.price, 0), actor.id, when.toISOString(), when.toISOString(), when.toISOString()).lastInsertRowid,
-        );
+             VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?, ?) RETURNING id`,
+            number, wh, customer, ref, ymd(when), list.reduce((s, l) => s + l.qty, 0), list.reduce((s, l) => s + l.qty * l.p.price, 0), actor.id, when.toISOString(), when.toISOString(), when.toISOString(),
+          )
+        ).rows[0].id;
         for (const l of list) {
-          db.prepare('INSERT INTO stock_dispatch_items (dispatch_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)').run(did, l.p.id, l.qty, l.p.price);
-          post(actor, when, { productId: l.p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: l.qty, reference: `${number} / ${ref}`, sourceType: 'DISPATCH', sourceId: did });
+          await db.run('INSERT INTO stock_dispatch_items (dispatch_id, product_id, quantity, unit_price) VALUES (?, ?, ?, ?)', did, l.p.id, l.qty, l.p.price);
+          await post(actor, when, { productId: l.p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: l.qty, reference: `${number} / ${ref}`, sourceType: 'DISPATCH', sourceId: did });
         }
       }
 
@@ -304,24 +316,23 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
         const p = pick(products);
         const type: TxType = rand() < 0.5 ? 'STOCK_IN' : 'STOCK_OUT';
         const qty = int(1, 5);
-        if (type === 'STOCK_IN' || getQuantity(db, p.id, wh) >= qty)
-          post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type, quantity: qty, notes: 'Barcode scan', sourceType: 'SCAN' });
+        if (type === 'STOCK_IN' || getQuantity(p.id) >= qty)
+          await post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type, quantity: qty, notes: 'Barcode scan', sourceType: 'SCAN' });
       }
       if (rand() < 0.08) {
         const p = pick(products);
-        post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type: 'RETURN_IN', quantity: int(1, 3), reference: `RMA-${int(100, 999)}`, notes: 'Customer return — packaging damaged', sourceType: 'ADJUSTMENT' });
+        await post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type: 'RETURN_IN', quantity: int(1, 3), reference: `RMA-${int(100, 999)}`, notes: 'Customer return — packaging damaged', sourceType: 'ADJUSTMENT' });
       }
       if (day % 30 === 0) {
         // Monthly cycle count on a few products
         for (let k = 0; k < 4; k++) {
           const p = pick(products);
-          const q = getQuantity(db, p.id, wh);
+          const q = getQuantity(p.id);
           const counted = Math.max(0, q + pick([-3, -2, -1, -1, 1, 2]));
-          const tx = adjustToCount(db, manager, { productId: p.id, warehouseId: wh, countedQuantity: counted, reason: pick(['Physical inventory count', 'Damaged goods', 'Cycle count correction']) });
+          const tx = await adjustToCount(db, manager, { productId: p.id, warehouseId: wh, countedQuantity: counted, reason: pick(['Physical inventory count', 'Damaged goods', 'Cycle count correction']) });
           if (tx) {
-            const iso = tick().toISOString();
-            db.prepare('UPDATE inventory_transactions SET created_at = ? WHERE id = ?').run(iso, tx.id);
-            db.prepare('UPDATE audit_logs SET created_at = ? WHERE entity_type = ? AND entity_id = ?').run(iso, 'inventory_transaction', tx.id);
+            onHand.set(tx.product_id, tx.quantity_after);
+            dates.push({ id: tx.id, at: tick().toISOString() });
           }
         }
       }
@@ -331,31 +342,43 @@ export function seedDemoData(db: DB, opts: { keepExistingUsers?: boolean } = {})
     clock = Date.now() - 4 * 3600_000;
     for (let k = 0; k < 6; k++) {
       const p = pick(products.filter((x) => x.velocity >= 2));
-      post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type: k % 3 === 0 ? 'STOCK_IN' : 'STOCK_OUT', quantity: int(1, 4), notes: 'Barcode scan', sourceType: 'SCAN' });
+      await post(pick(staff), tick(), { productId: p.id, warehouseId: wh, type: k % 3 === 0 ? 'STOCK_IN' : 'STOCK_OUT', quantity: int(1, 4), notes: 'Barcode scan', sourceType: 'SCAN' });
     }
     // Make sure the Low Stock page has something to show.
     for (const sku of ['BEV-008', 'ELC-002', 'PKG-006']) {
       const p = products.find((x) => x.sku === sku)!;
-      const q = getQuantity(db, p.id, wh);
-      if (q > 0) post(staff[0], tick(), { productId: p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: q, reference: 'DEMO', notes: 'Large order', sourceType: 'SCAN' });
+      const q = getQuantity(p.id);
+      if (q > 0) await post(staff[0], tick(), { productId: p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: q, reference: 'DEMO', notes: 'Large order', sourceType: 'SCAN' });
     }
     for (const sku of ['FOD-001', 'CLN-004', 'OFF-001', 'PRC-006']) {
       const p = products.find((x) => x.sku === sku)!;
-      const q = getQuantity(db, p.id, wh);
+      const q = getQuantity(p.id);
       const target = Math.max(1, Math.floor(p.min * 0.6));
-      if (q > target) post(staff[1], tick(), { productId: p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: q - target, reference: 'DEMO', notes: 'Large order', sourceType: 'SCAN' });
+      if (q > target) await post(staff[1], tick(), { productId: p.id, warehouseId: wh, type: 'STOCK_OUT', quantity: q - target, reference: 'DEMO', notes: 'Large order', sourceType: 'SCAN' });
     }
 
     for (const [key, value] of seq) {
       const [name, year] = key.split(':');
-      db.prepare('INSERT OR REPLACE INTO sequences (name, year, value) VALUES (?, ?, ?)').run(name, Number(year), value);
+      await db.run(
+        'INSERT INTO sequences (name, year, value) VALUES (?, ?, ?) ON CONFLICT (name, year) DO UPDATE SET value = excluded.value',
+        name, Number(year), value,
+      );
     }
-  })();
+  }
 
-  const stats = db
-    .prepare(
-      'SELECT (SELECT COUNT(*) FROM products) products, (SELECT COUNT(*) FROM inventory_transactions) transactions, (SELECT COUNT(*) FROM stock_receipts) receipts, (SELECT COUNT(*) FROM stock_dispatches) dispatches',
-    )
-    .get() as DemoStats;
-  return stats;
+  // Back-date the transactions and their audit entries.
+  const dated = JSON.stringify(dates);
+  await db.run(
+    `UPDATE inventory_transactions t SET created_at = v.at FROM jsonb_to_recordset(?::jsonb) AS v(id integer, at text) WHERE t.id = v.id`,
+    dated,
+  );
+  await db.run(
+    `UPDATE audit_logs a SET created_at = v.at FROM jsonb_to_recordset(?::jsonb) AS v(id integer, at text)
+     WHERE a.entity_type = 'inventory_transaction' AND a.entity_id = v.id`,
+    dated,
+  );
+
+  return (await db.get<DemoStats>(
+    'SELECT (SELECT COUNT(*) FROM products) products, (SELECT COUNT(*) FROM inventory_transactions) transactions, (SELECT COUNT(*) FROM stock_receipts) receipts, (SELECT COUNT(*) FROM stock_dispatches) dispatches',
+  ))!;
 }

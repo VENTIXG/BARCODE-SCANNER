@@ -14,17 +14,17 @@ export const transactionsRouter = Router();
 /** Window in which warehouse users may undo their own scans. */
 const OWN_SCAN_UNDO_MINUTES = 30;
 
-transactionsRouter.get('/', (req, res) => {
+transactionsRouter.get('/', async (req, res) => {
   if (!can(req.user!.role, 'transactions.view')) throw forbidden();
   const { page, pageSize, offset } = pagination(req.query, 50);
-  const { total, rows } = listTransactions(getDb(), readTxFilters(req.query), pageSize, offset);
+  const { total, rows } = await listTransactions(getDb(), readTxFilters(req.query), pageSize, offset);
   res.json({ data: rows, total, page, pageSize });
 });
 
 /** Users for filter drop-downs (transactions / activity log). */
-transactionsRouter.get('/users', (req, res) => {
+transactionsRouter.get('/users', async (req, res) => {
   if (!can(req.user!.role, 'transactions.view') && !can(req.user!.role, 'audit.view')) throw forbidden();
-  res.json({ data: getDb().prepare('SELECT id, username, full_name FROM users ORDER BY username').all() });
+  res.json({ data: await getDb().all('SELECT id, username, full_name FROM users ORDER BY username') });
 });
 
 /**
@@ -32,11 +32,11 @@ transactionsRouter.get('/users', (req, res) => {
  * transaction; other users only their own barcode scans from the last 30 minutes
  * (the "Undo" button on the scanner screen).
  */
-transactionsRouter.post('/:id/reverse', (req, res) => {
+transactionsRouter.post('/:id/reverse', async (req, res) => {
   const db = getDb();
   const id = idParam(req.params.id);
   const { reason } = z.object({ reason: optText(500) }).parse(req.body ?? {});
-  const tx = db.prepare('SELECT * FROM inventory_transactions WHERE id = ?').get(id) as TransactionRow | undefined;
+  const tx = await db.get<TransactionRow>('SELECT * FROM inventory_transactions WHERE id = ?', id);
   if (!tx) throw notFound('Transaction not found');
   const actor = actorOf(req);
   const ownRecentScan =
@@ -47,6 +47,6 @@ transactionsRouter.post('/:id/reverse', (req, res) => {
     throw forbidden('You can only undo your own scans from the last 30 minutes');
   if (['RECEIPT', 'DISPATCH'].includes(tx.source_type) && tx.source_id)
     throw forbidden('This transaction belongs to a document. Cancel the whole document instead.');
-  const reversal = reverseTransaction(db, actor, id, reason ?? undefined);
-  res.json({ data: { transaction: reversal, product: serializeProduct(getProduct(db, tx.product_id)!) } });
+  const reversal = await reverseTransaction(db, actor, id, reason ?? undefined);
+  res.json({ data: { transaction: reversal, product: serializeProduct((await getProduct(db, tx.product_id))!) } });
 });

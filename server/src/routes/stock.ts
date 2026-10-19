@@ -32,14 +32,14 @@ const scanBody = z
  * When a barcode matches several products (confirmed duplicates) the client
  * is asked to pick one and re-submits with productId.
  */
-stockRouter.post('/scan', requirePermission('stock.scan'), (req, res) => {
+stockRouter.post('/scan', requirePermission('stock.scan'), async (req, res) => {
   const db = getDb();
   const body = scanBody.parse(req.body);
   const actor = actorOf(req);
-  const out = runIdempotent(db, actor, body.idempotencyKey, 'scan', () => {
+  const out = await runIdempotent(db, actor, body.idempotencyKey, 'scan', async () => {
     let productId = body.productId;
     if (!productId) {
-      const matches = lookupByCode(db, body.code!);
+      const matches = await lookupByCode(db, body.code!);
       if (matches.length === 0)
         throw new HttpError(404, `No product found for code "${body.code}"`, 'PRODUCT_NOT_FOUND', { code: body.code });
       if (matches.length > 1)
@@ -48,12 +48,12 @@ stockRouter.post('/scan', requirePermission('stock.scan'), (req, res) => {
         });
       productId = matches[0].id;
     }
-    const product = getProduct(db, productId);
+    const product = await getProduct(db, productId);
     if (!product) throw notFound('Product not found');
     if (product.status === 'INACTIVE' && body.mode === 'IN')
       throw badRequest(`Product ${product.sku} is inactive. Activate it before receiving stock.`, 'PRODUCT_INACTIVE');
 
-    const tx = applyStockChange(db, actor, {
+    const tx = await applyStockChange(db, actor, {
       productId,
       type: body.mode === 'IN' ? 'STOCK_IN' : 'STOCK_OUT',
       quantity: body.quantity,
@@ -61,7 +61,7 @@ stockRouter.post('/scan', requirePermission('stock.scan'), (req, res) => {
       notes: body.notes ?? 'Barcode scan',
       sourceType: 'SCAN',
     });
-    return { status: 201, body: { data: { product: serializeProduct(getProduct(db, productId)!), transaction: tx } } };
+    return { status: 201, body: { data: { product: serializeProduct((await getProduct(db, productId))!), transaction: tx } } };
   });
   res.status(out.status).json(out.body);
 });
@@ -87,21 +87,21 @@ const adjustBody = z.discriminatedUnion('mode', [
   }),
 ]);
 
-stockRouter.post('/adjust', requirePermission('stock.adjust'), (req, res) => {
+stockRouter.post('/adjust', requirePermission('stock.adjust'), async (req, res) => {
   const db = getDb();
   const body = adjustBody.parse(req.body);
   const actor = actorOf(req);
-  const out = runIdempotent(db, actor, body.idempotencyKey, 'adjust', () => {
+  const out = await runIdempotent(db, actor, body.idempotencyKey, 'adjust', async () => {
     let tx;
     if (body.mode === 'count') {
-      tx = adjustToCount(db, actor, {
+      tx = await adjustToCount(db, actor, {
         productId: body.productId,
         countedQuantity: body.countedQuantity,
         reason: body.reason,
         reference: body.reference,
       });
     } else {
-      tx = applyStockChange(db, actor, {
+      tx = await applyStockChange(db, actor, {
         productId: body.productId,
         type: body.mode,
         quantity: body.quantity,
@@ -110,7 +110,7 @@ stockRouter.post('/adjust', requirePermission('stock.adjust'), (req, res) => {
         sourceType: 'ADJUSTMENT',
       });
     }
-    const product = getProduct(db, body.productId);
+    const product = await getProduct(db, body.productId);
     if (!product) throw notFound('Product not found');
     return { status: 200, body: { data: { product: serializeProduct(product), transaction: tx ?? null } } };
   });
@@ -128,23 +128,23 @@ const countBody = z.object({
     .max(5000),
 });
 
-stockRouter.post('/count', requirePermission('stock.adjust'), (req, res) => {
+stockRouter.post('/count', requirePermission('stock.adjust'), async (req, res) => {
   const db = getDb();
   const body = countBody.parse(req.body);
   const actor = actorOf(req);
-  const out = runIdempotent(db, actor, body.idempotencyKey, 'count', () => {
+  const out = await runIdempotent(db, actor, body.idempotencyKey, 'count', async () => {
     let adjusted = 0;
     let unchanged = 0;
     let netChange = 0;
     for (const item of body.items) {
-      const before = getQuantity(db, item.productId);
-      const tx = adjustToCount(db, actor, { ...item, reason: body.reason, reference: body.reference });
+      const before = await getQuantity(db, item.productId);
+      const tx = await adjustToCount(db, actor, { ...item, reason: body.reason, reference: body.reference });
       if (tx) {
         adjusted++;
         netChange += round3(item.countedQuantity - before);
       } else unchanged++;
     }
-    audit(db, actor, {
+    await audit(db, actor, {
       action: 'INVENTORY.COUNT',
       entityType: 'inventory',
       description: `${actor.username} completed a stock count of ${body.items.length} products (${adjusted} adjusted, ${unchanged} unchanged)${body.reference ? `, ref ${body.reference}` : ''}.`,

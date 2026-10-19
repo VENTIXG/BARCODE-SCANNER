@@ -4,13 +4,13 @@ import { escapeLike, num, pagination, str } from '../lib/http.js';
 
 export const auditRouter = Router();
 
-auditRouter.get('/', (req, res) => {
+auditRouter.get('/', async (req, res) => {
   const db = getDb();
   const { page, pageSize, offset } = pagination(req.query, 50);
   const where: string[] = [];
-  const params: Record<string, unknown> = {};
+  const params: Record<string, string | number> = {};
   const q = str(req.query.q);
-  if (q) (where.push(`(a.description LIKE @like ESCAPE '\\' OR a.username LIKE @like ESCAPE '\\')`), (params.like = `%${escapeLike(q)}%`));
+  if (q) (where.push(`(a.description ILIKE @like ESCAPE '\\' OR a.username ILIKE @like ESCAPE '\\')`), (params.like = `%${escapeLike(q)}%`));
   const userId = num(req.query.userId);
   if (userId) (where.push('a.user_id = @userId'), (params.userId = userId));
   const productId = num(req.query.productId);
@@ -22,17 +22,16 @@ auditRouter.get('/', (req, res) => {
   const to = str(req.query.to);
   if (to) (where.push('a.created_at < @to'), (params.to = to));
   const w = where.length ? `WHERE ${where.join(' AND ')}` : '';
-  const total = db.prepare(`SELECT COUNT(*) FROM audit_logs a ${w}`).pluck().get(params);
-  const rows = db
-    .prepare(
-      `SELECT a.*, p.sku AS product_sku, p.name AS product_name
-       FROM audit_logs a LEFT JOIN products p ON p.id = a.product_id
-       ${w} ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset`,
-    )
-    .all({ ...params, limit: pageSize, offset });
+  const total = (await db.value<number>(`SELECT COUNT(*) FROM audit_logs a ${w}`, params)) ?? 0;
+  const rows = await db.all(
+    `SELECT a.*, p.sku AS product_sku, p.name AS product_name
+     FROM audit_logs a LEFT JOIN products p ON p.id = a.product_id
+     ${w} ORDER BY a.created_at DESC, a.id DESC LIMIT @limit OFFSET @offset`,
+    { ...params, limit: pageSize, offset },
+  );
   res.json({ data: rows, total, page, pageSize });
 });
 
-auditRouter.get('/actions', (_req, res) => {
-  res.json({ data: getDb().prepare('SELECT DISTINCT action FROM audit_logs ORDER BY action').pluck().all() });
+auditRouter.get('/actions', async (_req, res) => {
+  res.json({ data: await getDb().column('SELECT DISTINCT action FROM audit_logs ORDER BY action') });
 });

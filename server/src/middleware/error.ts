@@ -29,12 +29,13 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
   if (e?.type === 'entity.parse.failed') {
     return res.status(400).json({ error: { message: 'Malformed JSON body', code: 'BAD_JSON' } });
   }
-  if (typeof e?.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT')) {
-    const msg = e.message ?? '';
+  // PostgreSQL integrity errors (class 23): unique, foreign key, check, not null.
+  if (typeof e?.code === 'string' && /^23[0-9A-Z]{3}$/.test(e.code)) {
+    const constraint = (err as { constraint?: string }).constraint ?? '';
     let message = 'The operation violates a data constraint';
-    if (msg.includes('products.sku')) message = 'A product with this SKU already exists';
-    else if (msg.includes('UNIQUE')) message = 'A record with the same unique value already exists';
-    else if (msg.includes('FOREIGN KEY')) message = 'This record is referenced by other data and cannot be changed';
+    if (constraint === 'products_sku_key') message = 'A product with this SKU already exists';
+    else if (e.code === '23505') message = 'A record with the same unique value already exists';
+    else if (e.code === '23503' || e.code === '23001') message = 'This record is referenced by other data and cannot be changed';
     return res.status(409).json({ error: { message, code: 'CONSTRAINT' } });
   }
   if (e?.code === 'LIMIT_FILE_SIZE') {

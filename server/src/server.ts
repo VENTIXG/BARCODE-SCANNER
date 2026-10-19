@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { config } from './config.js';
-import { closeDb, getDb } from './db/index.js';
+import { closeDb, initDb } from './db/index.js';
 import { createApp } from './app.js';
 import { startBackupScheduler, stopBackupScheduler } from './lib/backup.js';
 import { startOffsiteSync, stopOffsiteSync } from './lib/offsite.js';
@@ -30,7 +30,7 @@ function listen(server: http.Server, port: number, host?: string) {
 export async function startServer(
   opts: { port?: number; host?: string; fallbackToFreePort?: boolean } = {},
 ): Promise<RunningServer> {
-  getDb(); // open + migrate before accepting requests
+  await initDb(); // open + migrate before accepting requests
   startBackupScheduler();
   startOffsiteSync();
   const server = http.createServer(createApp());
@@ -51,8 +51,10 @@ export async function startServer(
         stopOffsiteSync();
         server.closeAllConnections?.();
         server.close(() => {
-          closeDb();
-          resolve();
+          closeDb().then(resolve, (e) => {
+            console.error('[db] close failed:', e);
+            resolve();
+          });
         });
       }),
   };

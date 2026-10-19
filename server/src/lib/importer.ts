@@ -141,13 +141,24 @@ function cleanRow(raw: RawRow, errors: string[], warnings: string[]): CleanRow {
   };
 }
 
-export function validateRows(db: DB, rows: RawRow[]): RowResult[] {
-  const bySku = db.prepare('SELECT id, sku, name FROM products WHERE sku = ?');
-  const byBarcode = db.prepare('SELECT id, sku, name FROM products WHERE barcode = ?');
+export async function validateRows(db: DB, rows: RawRow[]): Promise<RowResult[]> {
+  type Ref = { id: number; sku: string; name: string };
+  // One read of all products instead of two queries per row (SKU and barcode ignore case).
+  const existing = await db.all<Ref & { barcode: string | null }>('SELECT id, sku, name, barcode FROM products');
+  const skuIndex = new Map<string, Ref>();
+  const barcodeIndex = new Map<string, Ref[]>();
+  for (const p of existing) {
+    const ref = { id: p.id, sku: p.sku, name: p.name };
+    skuIndex.set(p.sku.toLowerCase(), ref);
+    if (p.barcode) {
+      const k = p.barcode.toLowerCase();
+      barcodeIndex.set(k, [...(barcodeIndex.get(k) ?? []), ref]);
+    }
+  }
+  const bySku = { get: (sku: string) => skuIndex.get(sku.toLowerCase()) };
+  const byBarcode = { all: (code: string) => barcodeIndex.get(code.toLowerCase()) ?? [] };
   const seenSku = new Map<string, number>();
   const seenBarcode = new Map<string, number>();
-  type Ref = { id: number; sku: string; name: string };
-
   return rows.map((raw) => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -168,8 +179,8 @@ export function validateRows(db: DB, rows: RawRow[]): RowResult[] {
     }
 
     if (data.sku && !errors.length) {
-      const skuMatch = bySku.get(data.sku) as Ref | undefined;
-      const barcodeMatches = data.barcode ? (byBarcode.all(data.barcode) as Ref[]) : [];
+      const skuMatch = bySku.get(data.sku);
+      const barcodeMatches = data.barcode ? byBarcode.all(data.barcode) : [];
       if (skuMatch) {
         const foreign = barcodeMatches.filter((b) => b.id !== skuMatch.id);
         if (foreign.length)
@@ -199,8 +210,13 @@ export interface ImportSummary {
   errorRows: { rowNumber: number; errors: string[] }[];
 }
 
-export function importRows(db: DB, actor: Actor, rows: RawRow[], options: ImportOptions, fileName?: string): ImportSummary {
-  const warehouseId = getDefaultWarehouseId(db);
+export async function importRows(
+  db: DB,
+  actor: Actor,
+  rows: RawRow[],
+  options: ImportOptions,
+  fileName?: string,
+): Promise<ImportSummary> {
   const summary: ImportSummary = {
     imported: 0,
     updated: 0,
@@ -213,16 +229,17 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
   };
   const reference = `IMPORT ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`;
 
-  const lookupNamed = (table: 'categories' | 'suppliers', name: string, created: string[]): number | null => {
-    const found = db.prepare(`SELECT id FROM ${table} WHERE ims_norm(name) = ims_norm(?)`).pluck().get(name) as number | undefined;
-    if (found) return found;
-    if (!options.createMissing) return null;
-    created.push(name);
-    return Number(db.prepare(`INSERT INTO ${table} (name) VALUES (?)`).run(name).lastInsertRowid);
-  };
+  await db.tx(async (t) => {
+    const warehouseId = await getDefaultWarehouseId(t);
+    const lookupNamed = async (table: 'categories' | 'suppliers', name: string, created: string[]): Promise<number | null> => {
+      const found = await t.value<number>(`SELECT id FROM ${table} WHERE ims_norm(name::text) = ims_norm(?)`, name);
+      if (found) return found;
+      if (!options.createMissing) return null;
+      created.push(name);
+      return (await t.value<number>(`INSERT INTO ${table} (name) VALUES (?) RETURNING id`, name)) as number;
+    };
 
-  db.transaction(() => {
-    const results = validateRows(db, rows);
+    const results = await validateRows(t, rows);
     for (const r of results) {
       if (r.status === 'error' || !r.data) {
         summary.errors++;
@@ -230,22 +247,30 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
         continue;
       }
       const d = r.data;
-      const categoryId = d.category ? lookupNamed('categories', d.category, summary.createdCategories) : null;
-      const supplierId = d.supplier ? lookupNamed('suppliers', d.supplier, summary.createdSuppliers) : null;
-      const locationId = d.location ? findOrCreateLocation(db, warehouseId, d.location) : null;
+      const categoryId = d.category ? await lookupNamed('categories', d.category, summary.createdCategories) : null;
+      const supplierId = d.supplier ? await lookupNamed('suppliers', d.supplier, summary.createdSuppliers) : null;
+      const locationId = d.location ? await findOrCreateLocation(t, warehouseId, d.location) : null;
 
       if (r.status === 'new') {
-        const id = Number(
-          db
-            .prepare(
-              `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
-                 purchase_price, selling_price, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .run(d.sku, d.barcode, d.name, d.description, categoryId, supplierId, d.unit ?? 'pcs', d.minStock ?? 0,
-              d.purchasePrice ?? 0, d.sellingPrice ?? 0, d.status ?? 'ACTIVE', actor.id).lastInsertRowid,
-        );
-        setProductLocation(db, id, warehouseId, locationId);
-        audit(db, actor, {
+        const id = (await t.value<number>(
+          `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
+             purchase_price, selling_price, status, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id`,
+          d.sku,
+          d.barcode,
+          d.name,
+          d.description,
+          categoryId,
+          supplierId,
+          d.unit ?? 'pcs',
+          d.minStock ?? 0,
+          d.purchasePrice ?? 0,
+          d.sellingPrice ?? 0,
+          d.status ?? 'ACTIVE',
+          actor.id,
+        )) as number;
+        await setProductLocation(t, id, warehouseId, locationId);
+        await audit(t, actor, {
           action: 'PRODUCT.CREATE',
           entityType: 'product',
           entityId: id,
@@ -254,7 +279,7 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
           newValue: d,
         });
         if (d.quantity && d.quantity > 0)
-          applyStockChange(db, actor, {
+          await applyStockChange(t, actor, {
             productId: id,
             warehouseId,
             type: 'INITIAL_STOCK',
@@ -276,30 +301,31 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
         continue;
       }
       const id = r.match!.id;
-      const before = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown>;
+      const before = (await t.get<Record<string, unknown>>('SELECT * FROM products WHERE id = ?', id))!;
       // Empty cells never wipe existing data.
       const next = {
         sku: d.sku,
-        barcode: d.barcode ?? before.barcode,
-        name: d.name ?? before.name,
-        description: d.description ?? before.description,
-        category_id: d.category ? categoryId ?? before.category_id : before.category_id,
-        supplier_id: d.supplier ? supplierId ?? before.supplier_id : before.supplier_id,
-        unit: d.unit ?? before.unit,
-        min_stock: d.minStock ?? before.min_stock,
-        purchase_price: d.purchasePrice ?? before.purchase_price,
-        selling_price: d.sellingPrice ?? before.selling_price,
-        status: d.status ?? before.status,
+        barcode: (d.barcode ?? before.barcode) as string | null,
+        name: (d.name ?? before.name) as string,
+        description: (d.description ?? before.description) as string | null,
+        category_id: (d.category ? (categoryId ?? before.category_id) : before.category_id) as number | null,
+        supplier_id: (d.supplier ? (supplierId ?? before.supplier_id) : before.supplier_id) as number | null,
+        unit: (d.unit ?? before.unit) as string,
+        min_stock: (d.minStock ?? before.min_stock) as number,
+        purchase_price: (d.purchasePrice ?? before.purchase_price) as number,
+        selling_price: (d.sellingPrice ?? before.selling_price) as number,
+        status: (d.status ?? before.status) as string,
       };
-      db.prepare(
+      await t.run(
         `UPDATE products SET sku = @sku, barcode = @barcode, name = @name, description = @description,
            category_id = @category_id, supplier_id = @supplier_id, unit = @unit, min_stock = @min_stock,
            purchase_price = @purchase_price, selling_price = @selling_price, status = @status, updated_at = @now
          WHERE id = @id`,
-      ).run({ ...next, now: nowIso(), id });
-      if (locationId) setProductLocation(db, id, warehouseId, locationId);
+        { ...next, now: nowIso(), id },
+      );
+      if (locationId) await setProductLocation(t, id, warehouseId, locationId);
       const changed = Object.keys(next).filter((k) => String(before[k] ?? '') !== String((next as Record<string, unknown>)[k] ?? ''));
-      audit(db, actor, {
+      await audit(t, actor, {
         action: 'PRODUCT.UPDATE',
         entityType: 'product',
         entityId: id,
@@ -309,9 +335,9 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
         newValue: Object.fromEntries(changed.map((k) => [k, (next as Record<string, unknown>)[k]])),
       });
       if (d.quantity !== null && options.quantityMode === 'set') {
-        adjustToCount(db, actor, { productId: id, warehouseId, countedQuantity: d.quantity, reason: 'Stock set by Excel import', reference });
+        await adjustToCount(t, actor, { productId: id, warehouseId, countedQuantity: d.quantity, reason: 'Stock set by Excel import', reference });
       } else if (d.quantity && d.quantity > 0 && options.quantityMode === 'add') {
-        applyStockChange(db, actor, {
+        await applyStockChange(t, actor, {
           productId: id,
           warehouseId,
           type: 'STOCK_IN',
@@ -325,12 +351,12 @@ export function importRows(db: DB, actor: Actor, rows: RawRow[], options: Import
       summary.updated++;
     }
 
-    audit(db, actor, {
+    await audit(t, actor, {
       action: 'IMPORT.PRODUCTS',
       entityType: 'import',
       description: `${actor.username} imported products from ${fileName ?? 'Excel'}: ${summary.imported} imported, ${summary.updated} updated, ${summary.skipped} skipped, ${summary.errors} errors.`,
       newValue: { ...summary, errorRows: undefined },
     });
-  })();
+  });
   return summary;
 }

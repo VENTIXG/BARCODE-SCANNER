@@ -23,12 +23,11 @@ export interface AuditEntry {
 
 const json = (v: unknown) => (v === undefined || v === null ? null : JSON.stringify(v));
 
-export function audit(db: DB, actor: Actor | null, e: AuditEntry) {
-  db.prepare(
+export async function audit(db: DB, actor: Actor | null, e: AuditEntry) {
+  await db.run(
     `INSERT INTO audit_logs (user_id, username, action, entity_type, entity_id, product_id,
        description, old_value, new_value, ip_address, user_agent)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
     actor?.id ?? null,
     actor?.username ?? 'system',
     e.action,

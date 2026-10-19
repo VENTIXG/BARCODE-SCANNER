@@ -52,7 +52,7 @@ export function clearSession(res: Response) {
 
 /** Verifies the session cookie and re-loads the user on every request so
  *  deactivation, role changes and password resets take effect immediately. */
-export function requireAuth(req: Request, _res: Response, next: NextFunction) {
+export async function requireAuth(req: Request, _res: Response, next: NextFunction) {
   const token = req.cookies?.[COOKIE_NAME] as string | undefined;
   if (!token) return next(new HttpError(401, 'Authentication required', 'UNAUTHENTICATED'));
   let payload: TokenPayload;
@@ -61,11 +61,15 @@ export function requireAuth(req: Request, _res: Response, next: NextFunction) {
   } catch {
     return next(new HttpError(401, 'Session expired, please sign in again', 'UNAUTHENTICATED'));
   }
-  const user = getDb()
-    .prepare(
+  let user: AuthUser | undefined;
+  try {
+    user = await getDb().get<AuthUser>(
       'SELECT id, username, full_name, email, role, is_active, token_version, must_change_password FROM users WHERE id = ?',
-    )
-    .get(payload.sub) as AuthUser | undefined;
+      payload.sub,
+    );
+  } catch (e) {
+    return next(e);
+  }
   if (!user || !user.is_active || user.token_version !== payload.tv)
     return next(new HttpError(401, 'Session is no longer valid', 'UNAUTHENTICATED'));
   req.user = user;

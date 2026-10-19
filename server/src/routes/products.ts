@@ -1,11 +1,9 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import multer from 'multer';
 import { z } from 'zod';
-import { config } from '../config.js';
-import { getDb, getDefaultWarehouseId, nowIso } from '../db/index.js';
+import { getDb, getDefaultWarehouseId, nowIso, type DB } from '../db/index.js';
 import { actorOf, requirePermission } from '../middleware/auth.js';
 import { audit, diff } from '../lib/audit.js';
 import { badRequest, conflict, notFound } from '../lib/errors.js';
@@ -67,88 +65,86 @@ function readFilters(query: Record<string, unknown>): ProductFilters & { sort?: 
   };
 }
 
-productsRouter.get('/', (req, res) => {
+productsRouter.get('/', async (req, res) => {
   const db = getDb();
   const { page, pageSize, offset } = pagination(req.query);
-  const { total, rows } = listProducts(db, readFilters(req.query), { limit: pageSize, offset });
+  const { total, rows } = await listProducts(db, readFilters(req.query), { limit: pageSize, offset });
   res.json({ data: rows.map(serializeProduct), total, page, pageSize });
 });
 
 /** Barcode / SKU exact lookup (scanner). Returns all matches. */
-productsRouter.get('/lookup', (req, res) => {
+productsRouter.get('/lookup', async (req, res) => {
   const c = str(req.query.code);
   if (!c) throw badRequest('code is required');
-  res.json({ data: lookupByCode(getDb(), c).map(serializeProduct) });
+  res.json({ data: (await lookupByCode(getDb(), c)).map(serializeProduct) });
 });
 
 /** Live uniqueness check for the product form. */
-productsRouter.get('/check-unique', (req, res) => {
+productsRouter.get('/check-unique', async (req, res) => {
   const db = getDb();
   const excludeId = num(req.query.excludeId) ?? 0;
   const sku = str(req.query.sku);
   const barcode = str(req.query.barcode);
-  const skuMatch = sku
-    ? (db.prepare('SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?').get(sku, excludeId) ?? null)
-    : null;
-  const barcodeMatches = barcode
-    ? db.prepare('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?').all(barcode, excludeId)
-    : [];
+  const skuMatch = sku ? ((await db.get('SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?', sku, excludeId)) ?? null) : null;
+  const barcodeMatches = barcode ? await db.all('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?', barcode, excludeId) : [];
   res.json({ sku: skuMatch, barcode: barcodeMatches });
 });
 
-productsRouter.get('/:id', (req, res) => {
+productsRouter.get('/:id', async (req, res) => {
   const db = getDb();
   const id = idParam(req.params.id);
-  const p = getProduct(db, id);
+  const p = await getProduct(db, id);
   if (!p) throw notFound('Product not found');
-  const variants = (db.prepare('SELECT id FROM products WHERE parent_id = ? ORDER BY id').pluck().all(id) as number[]).map(
-    (vid) => serializeProduct(getProduct(db, vid)!),
+  const variants = [];
+  for (const vid of await db.column<number>('SELECT id FROM products WHERE parent_id = ? ORDER BY id', id))
+    variants.push(serializeProduct((await getProduct(db, vid))!));
+  const stats = await db.get(
+    `SELECT
+       COALESCE(SUM(CASE WHEN quantity_change > 0 THEN quantity_change END), 0) AS "totalIn",
+       COALESCE(SUM(CASE WHEN quantity_change < 0 THEN -quantity_change END), 0) AS "totalOut",
+       COUNT(*) AS transactions,
+       MAX(CASE WHEN type = 'STOCK_IN' THEN created_at END) AS "lastStockIn",
+       MAX(CASE WHEN type = 'STOCK_OUT' THEN created_at END) AS "lastStockOut"
+     FROM inventory_transactions WHERE product_id = ?`,
+    id,
   );
-  const stats = db
-    .prepare(
-      `SELECT
-         COALESCE(SUM(CASE WHEN quantity_change > 0 THEN quantity_change END), 0) AS totalIn,
-         COALESCE(SUM(CASE WHEN quantity_change < 0 THEN -quantity_change END), 0) AS totalOut,
-         COUNT(*) AS transactions,
-         MAX(CASE WHEN type = 'STOCK_IN' THEN created_at END) AS lastStockIn,
-         MAX(CASE WHEN type = 'STOCK_OUT' THEN created_at END) AS lastStockOut
-       FROM inventory_transactions WHERE product_id = ?`,
-    )
-    .get(id);
-  const duplicates = p.barcode
-    ? db.prepare('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?').all(p.barcode, id)
-    : [];
+  const duplicates = p.barcode ? await db.all('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?', p.barcode, id) : [];
   res.json({ data: serializeProduct(p), stats, barcodeDuplicates: duplicates, variants });
 });
 
-productsRouter.get('/:id/transactions', (req, res) => {
+productsRouter.get('/:id/transactions', async (req, res) => {
   const db = getDb();
   const id = idParam(req.params.id);
   const { page, pageSize, offset } = pagination(req.query, 50);
-  const total = db.prepare('SELECT COUNT(*) FROM inventory_transactions WHERE product_id = ?').pluck().get(id);
-  const rows = db
-    .prepare(
-      `SELECT t.*, u.username, u.full_name AS user_full_name
-       FROM inventory_transactions t LEFT JOIN users u ON u.id = t.user_id
-       WHERE t.product_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT ? OFFSET ?`,
-    )
-    .all(id, pageSize, offset);
+  const total = await db.value<number>('SELECT COUNT(*) FROM inventory_transactions WHERE product_id = ?', id);
+  const rows = await db.all(
+    `SELECT t.*, u.username, u.full_name AS user_full_name
+     FROM inventory_transactions t LEFT JOIN users u ON u.id = t.user_id
+     WHERE t.product_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT ? OFFSET ?`,
+    id,
+    pageSize,
+    offset,
+  );
   res.json({ data: rows, total, page, pageSize });
 });
 
-function assertCodesAvailable(
-  db: ReturnType<typeof getDb>,
+async function assertCodesAvailable(
+  db: DB,
   body: { sku: string; barcode: string | null; confirmDuplicateBarcode?: boolean },
   excludeId = 0,
 ) {
-  const skuOwner = db.prepare('SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?').get(body.sku, excludeId) as
-    | { id: number; sku: string; name: string }
-    | undefined;
+  const skuOwner = await db.get<{ id: number; sku: string; name: string }>(
+    'SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?',
+    body.sku,
+    excludeId,
+  );
   if (skuOwner) throw conflict(`SKU ${body.sku} is already used by "${skuOwner.name}"`, 'DUPLICATE_SKU', skuOwner);
   if (body.barcode && !body.confirmDuplicateBarcode) {
-    const others = db
-      .prepare('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?')
-      .all(body.barcode, excludeId) as { id: number; sku: string; name: string }[];
+    const others = await db.all<{ id: number; sku: string; name: string }>(
+      'SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?',
+      body.barcode,
+      excludeId,
+    );
     if (others.length)
       throw conflict(
         `Barcode ${body.barcode} is already used by ${others.map((o) => o.sku).join(', ')}. Confirm to save a duplicate barcode.`,
@@ -158,46 +154,40 @@ function assertCodesAvailable(
   }
 }
 
-function assertRefs(db: ReturnType<typeof getDb>, body: { categoryId?: number | null; supplierId?: number | null }) {
-  if (body.categoryId && !db.prepare('SELECT 1 FROM categories WHERE id = ?').get(body.categoryId))
-    throw badRequest('Category not found');
-  if (body.supplierId && !db.prepare('SELECT 1 FROM suppliers WHERE id = ?').get(body.supplierId))
-    throw badRequest('Supplier not found');
+async function assertRefs(db: DB, body: { categoryId?: number | null; supplierId?: number | null }) {
+  if (body.categoryId && !(await db.get('SELECT 1 FROM categories WHERE id = ?', body.categoryId))) throw badRequest('Category not found');
+  if (body.supplierId && !(await db.get('SELECT 1 FROM suppliers WHERE id = ?', body.supplierId))) throw badRequest('Supplier not found');
 }
 
-productsRouter.post('/', requirePermission('products.manage'), (req, res) => {
+productsRouter.post('/', requirePermission('products.manage'), async (req, res) => {
   const db = getDb();
   const actor = actorOf(req);
   const body = createBody.parse(req.body);
-  const warehouseId = getDefaultWarehouseId(db);
 
-  const id = db.transaction(() => {
-    assertCodesAvailable(db, body);
-    assertRefs(db, body);
-    const info = db
-      .prepare(
-        `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
-           purchase_price, selling_price, status, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        body.sku,
-        body.barcode,
-        body.name,
-        body.description,
-        body.categoryId ?? null,
-        body.supplierId ?? null,
-        body.unit,
-        body.minStock,
-        body.purchasePrice,
-        body.sellingPrice,
-        body.status,
-        actor.id,
-      );
-    const productId = Number(info.lastInsertRowid);
-    const locationId = body.locationCode ? findOrCreateLocation(db, warehouseId, body.locationCode) : null;
-    setProductLocation(db, productId, warehouseId, locationId);
-    audit(db, actor, {
+  const id = await db.tx(async (t) => {
+    const warehouseId = await getDefaultWarehouseId(t);
+    await assertCodesAvailable(t, body);
+    await assertRefs(t, body);
+    const productId = (await t.value<number>(
+      `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
+         purchase_price, selling_price, status, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      body.sku,
+      body.barcode,
+      body.name,
+      body.description,
+      body.categoryId ?? null,
+      body.supplierId ?? null,
+      body.unit,
+      body.minStock,
+      body.purchasePrice,
+      body.sellingPrice,
+      body.status,
+      actor.id,
+    )) as number;
+    const locationId = body.locationCode ? await findOrCreateLocation(t, warehouseId, body.locationCode) : null;
+    await setProductLocation(t, productId, warehouseId, locationId);
+    await audit(t, actor, {
       action: 'PRODUCT.CREATE',
       entityType: 'product',
       entityId: productId,
@@ -206,7 +196,7 @@ productsRouter.post('/', requirePermission('products.manage'), (req, res) => {
       newValue: body,
     });
     if (body.initialQuantity > 0) {
-      applyStockChange(db, actor, {
+      await applyStockChange(t, actor, {
         productId,
         warehouseId,
         type: 'INITIAL_STOCK',
@@ -218,9 +208,9 @@ productsRouter.post('/', requirePermission('products.manage'), (req, res) => {
       });
     }
     return productId;
-  })();
+  });
 
-  res.status(201).json({ data: serializeProduct(getProduct(db, id)!) });
+  res.status(201).json({ data: serializeProduct((await getProduct(db, id))!) });
 });
 
 const FIELD_LABELS: Partial<Record<keyof ProductRow, string>> = {
@@ -238,28 +228,27 @@ const FIELD_LABELS: Partial<Record<keyof ProductRow, string>> = {
   location_code: 'location',
 };
 
-productsRouter.put('/:id', requirePermission('products.manage'), (req, res) => {
+productsRouter.put('/:id', requirePermission('products.manage'), async (req, res) => {
   const db = getDb();
   const actor = actorOf(req);
   const id = idParam(req.params.id);
   const body = productBody.parse(req.body);
-  const warehouseId = getDefaultWarehouseId(db);
 
-  db.transaction(() => {
-    const before = getProduct(db, id);
+  await db.tx(async (t) => {
+    const warehouseId = await getDefaultWarehouseId(t);
+    const before = await getProduct(t, id);
     if (!before) throw notFound('Product not found');
     // Only re-check the barcode if it actually changed.
-    assertCodesAvailable(
-      db,
+    await assertCodesAvailable(
+      t,
       { ...body, confirmDuplicateBarcode: body.confirmDuplicateBarcode || body.barcode === before.barcode },
       id,
     );
-    assertRefs(db, body);
-    db.prepare(
+    await assertRefs(t, body);
+    await t.run(
       `UPDATE products SET sku = ?, barcode = ?, name = ?, description = ?, category_id = ?, supplier_id = ?,
          unit = ?, min_stock = ?, purchase_price = ?, selling_price = ?, status = ?, updated_at = ?
        WHERE id = ?`,
-    ).run(
       body.sku,
       body.barcode,
       body.name,
@@ -274,13 +263,13 @@ productsRouter.put('/:id', requirePermission('products.manage'), (req, res) => {
       nowIso(),
       id,
     );
-    const locationId = body.locationCode ? findOrCreateLocation(db, warehouseId, body.locationCode) : null;
-    setProductLocation(db, id, warehouseId, locationId);
+    const locationId = body.locationCode ? await findOrCreateLocation(t, warehouseId, body.locationCode) : null;
+    await setProductLocation(t, id, warehouseId, locationId);
 
-    const after = getProduct(db, id)!;
+    const after = (await getProduct(t, id))!;
     const d = diff(before, after, FIELD_LABELS);
     if (d.changed) {
-      audit(db, actor, {
+      await audit(t, actor, {
         action: 'PRODUCT.UPDATE',
         entityType: 'product',
         entityId: id,
@@ -290,43 +279,42 @@ productsRouter.put('/:id', requirePermission('products.manage'), (req, res) => {
         newValue: d.newValue,
       });
     }
-  })();
+  });
 
-  res.json({ data: serializeProduct(getProduct(db, id)!) });
+  res.json({ data: serializeProduct((await getProduct(db, id))!) });
 });
 
-productsRouter.delete('/:id', requirePermission('products.delete'), (req, res) => {
-  const db = getDb();
+productsRouter.delete('/:id', requirePermission('products.delete'), async (req, res) => {
   const actor = actorOf(req);
   const id = idParam(req.params.id);
-  const p = getProduct(db, id);
-  if (!p) throw notFound('Product not found');
-  const used =
-    db.prepare('SELECT 1 FROM stock_receipt_items WHERE product_id = ? LIMIT 1').get(id) ||
-    db.prepare('SELECT 1 FROM stock_dispatch_items WHERE product_id = ? LIMIT 1').get(id) ||
-    db.prepare(`SELECT 1 FROM inventory_transactions WHERE product_id = ? AND type <> 'INITIAL_STOCK' LIMIT 1`).get(id);
-  const sizes = db.prepare('SELECT COUNT(*) FROM products WHERE parent_id = ?').pluck().get(id) as number;
-  if (sizes)
-    throw conflict(
-      `This product has ${sizes} sizes with their own stock history. Set it to Inactive, or delete the sizes first.`,
-      'PRODUCT_HAS_VARIANTS',
-    );
-  if (used)
-    throw conflict(
-      'This product has stock movements and cannot be deleted without losing history. Set it to Inactive instead.',
-      'PRODUCT_IN_USE',
-    );
-  db.transaction(() => {
-    audit(db, actor, {
+  await getDb().tx(async (t) => {
+    const p = await getProduct(t, id);
+    if (!p) throw notFound('Product not found');
+    const used =
+      (await t.get('SELECT 1 FROM stock_receipt_items WHERE product_id = ? LIMIT 1', id)) ||
+      (await t.get('SELECT 1 FROM stock_dispatch_items WHERE product_id = ? LIMIT 1', id)) ||
+      (await t.get(`SELECT 1 FROM inventory_transactions WHERE product_id = ? AND type <> 'INITIAL_STOCK' LIMIT 1`, id));
+    const sizes = (await t.value<number>('SELECT COUNT(*) FROM products WHERE parent_id = ?', id)) ?? 0;
+    if (sizes)
+      throw conflict(
+        `This product has ${sizes} sizes with their own stock history. Set it to Inactive, or delete the sizes first.`,
+        'PRODUCT_HAS_VARIANTS',
+      );
+    if (used)
+      throw conflict(
+        'This product has stock movements and cannot be deleted without losing history. Set it to Inactive instead.',
+        'PRODUCT_IN_USE',
+      );
+    await audit(t, actor, {
       action: 'PRODUCT.DELETE',
       entityType: 'product',
       entityId: id,
       description: `${actor.username} deleted product ${p.sku} (${p.name}).`,
       oldValue: serializeProduct(p),
     });
-    db.prepare('DELETE FROM products WHERE id = ?').run(id);
-  })();
-  if (p.image_path) fs.rm(path.join(config.uploadsDir, p.image_path), { force: true }, () => {});
+    // The photo goes with the product (product_images: ON DELETE CASCADE).
+    await t.run('DELETE FROM products WHERE id = ?', id);
+  });
   res.status(204).end();
 });
 
@@ -353,14 +341,14 @@ const variantBody = z.object({
  * barcode are scanned and counted separately, and its history is separate.
  * Category, supplier, prices and location are copied from the base product.
  */
-productsRouter.post('/:id/variants', requirePermission('products.manage'), (req, res) => {
+productsRouter.post('/:id/variants', requirePermission('products.manage'), async (req, res) => {
   const db = getDb();
   const actor = actorOf(req);
   const parentId = idParam(req.params.id);
   const body = variantBody.parse(req.body);
-  const warehouseId = getDefaultWarehouseId(db);
-  const out = runIdempotent(db, actor, body.idempotencyKey, `variants:${parentId}`, () => {
-    const parent = getProduct(db, parentId);
+  const out = await runIdempotent(db, actor, body.idempotencyKey, `variants:${parentId}`, async () => {
+    const warehouseId = await getDefaultWarehouseId(db);
+    const parent = await getProduct(db, parentId);
     if (!parent) throw notFound('Product not found');
     if (parent.parent_id) throw badRequest('Sizes can only be added to a base product, not to a size');
     const seen = new Set<string>();
@@ -369,47 +357,42 @@ productsRouter.post('/:id/variants', requirePermission('products.manage'), (req,
       if (seen.has(key)) throw badRequest(`Size ${v.size} is listed more than once`);
       seen.add(key);
     }
-    const createdIds: number[] = db.transaction(() =>
-      body.variants.map((v) => {
-        assertCodesAvailable(db, { sku: v.sku, barcode: v.barcode });
-        const info = db
-          .prepare(
-            `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
-               purchase_price, selling_price, status, created_by, parent_id, size)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            v.sku,
-            v.barcode,
-            `${parent.name} ${v.size}`,
-            parent.description,
-            parent.category_id,
-            parent.supplier_id,
-            parent.unit,
-            v.minStock,
-            parent.purchase_price,
-            parent.selling_price,
-            parent.status,
-            actor.id,
-            parentId,
-            v.size,
-          );
-        const id = Number(info.lastInsertRowid);
-        setProductLocation(db, id, warehouseId, parent.location_id);
-        if (v.initialQuantity > 0)
-          applyStockChange(db, actor, {
-            productId: id,
-            warehouseId,
-            type: 'INITIAL_STOCK',
-            quantity: v.initialQuantity,
-            notes: `Opening stock for size ${v.size}`,
-            sourceType: 'PRODUCT',
-            sourceId: id,
-          });
-        return id;
-      }),
-    )();
-    audit(db, actor, {
+    const createdIds: number[] = [];
+    for (const v of body.variants) {
+      await assertCodesAvailable(db, { sku: v.sku, barcode: v.barcode });
+      const id = (await db.value<number>(
+        `INSERT INTO products (sku, barcode, name, description, category_id, supplier_id, unit, min_stock,
+           purchase_price, selling_price, status, created_by, parent_id, size)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        v.sku,
+        v.barcode,
+        `${parent.name} ${v.size}`,
+        parent.description,
+        parent.category_id,
+        parent.supplier_id,
+        parent.unit,
+        v.minStock,
+        parent.purchase_price,
+        parent.selling_price,
+        parent.status,
+        actor.id,
+        parentId,
+        v.size,
+      )) as number;
+      await setProductLocation(db, id, warehouseId, parent.location_id);
+      if (v.initialQuantity > 0)
+        await applyStockChange(db, actor, {
+          productId: id,
+          warehouseId,
+          type: 'INITIAL_STOCK',
+          quantity: v.initialQuantity,
+          notes: `Opening stock for size ${v.size}`,
+          sourceType: 'PRODUCT',
+          sourceId: id,
+        });
+      createdIds.push(id);
+    }
+    await audit(db, actor, {
       action: 'PRODUCT.VARIANTS',
       entityType: 'product',
       entityId: parentId,
@@ -417,68 +400,66 @@ productsRouter.post('/:id/variants', requirePermission('products.manage'), (req,
       description: `${actor.username} added sizes ${body.variants.map((v) => v.size).join(', ')} to ${parent.sku}.`,
       newValue: { sizes: body.variants.map((v) => ({ size: v.size, sku: v.sku })) },
     });
-    return {
-      status: 201,
-      body: { data: createdIds.map((id) => serializeProduct(getProduct(db, id)!)) },
-    };
+    const created = [];
+    for (const id of createdIds) created.push(serializeProduct((await getProduct(db, id))!));
+    return { status: 201, body: { data: created } };
   });
   res.status(out.status).json(out.body);
 });
 
-// ---- Product image -------------------------------------------------------
+// ---- Product image (stored in the database: product_images) -------------------
+
+const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: config.uploadsDir,
-    filename: (_req, file, cb) => {
-      const ext = path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, '') || '.jpg';
-      cb(null, `p_${crypto.randomBytes(10).toString('hex')}${ext}`);
-    },
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
-    const ok = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(file.mimetype);
-    if (ok) cb(null, true);
+    if (IMAGE_TYPES.includes(file.mimetype)) cb(null, true);
     else cb(badRequest('Only JPG, PNG, WEBP or GIF images are allowed'));
   },
 });
 
-productsRouter.post('/:id/image', requirePermission('products.manage'), upload.single('image'), (req, res) => {
+productsRouter.post('/:id/image', requirePermission('products.manage'), upload.single('image'), async (req, res) => {
   const db = getDb();
   const id = idParam(req.params.id);
-  const p = getProduct(db, id);
   if (!req.file) throw badRequest('No image uploaded');
-  if (!p) {
-    fs.rmSync(req.file.path, { force: true });
-    throw notFound('Product not found');
-  }
-  db.prepare('UPDATE products SET image_path = ?, updated_at = ? WHERE id = ?').run(req.file.filename, nowIso(), id);
-  if (p.image_path) fs.rm(path.join(config.uploadsDir, p.image_path), { force: true }, () => {});
-  audit(db, actorOf(req), {
-    action: 'PRODUCT.IMAGE',
-    entityType: 'product',
-    entityId: id,
-    productId: id,
-    description: `${req.user!.username} updated the photo of ${p.sku}.`,
+  const file = req.file;
+  await db.tx(async (t) => {
+    const p = await getProduct(t, id);
+    if (!p) throw notFound('Product not found');
+    const ext = path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, '') || '.jpg';
+    const name = `p_${crypto.randomBytes(10).toString('hex')}${ext}`;
+    await t.run('INSERT INTO product_images (name, product_id, content_type, data) VALUES (?, ?, ?, ?)', name, id, file.mimetype, file.buffer);
+    await t.run('UPDATE products SET image_path = ?, updated_at = ? WHERE id = ?', name, nowIso(), id);
+    if (p.image_path) await t.run('DELETE FROM product_images WHERE name = ?', p.image_path);
+    await audit(t, actorOf(req), {
+      action: 'PRODUCT.IMAGE',
+      entityType: 'product',
+      entityId: id,
+      productId: id,
+      description: `${req.user!.username} updated the photo of ${p.sku}.`,
+    });
   });
-  res.json({ data: serializeProduct(getProduct(db, id)!) });
+  res.json({ data: serializeProduct((await getProduct(db, id))!) });
 });
 
-productsRouter.delete('/:id/image', requirePermission('products.manage'), (req, res) => {
+productsRouter.delete('/:id/image', requirePermission('products.manage'), async (req, res) => {
   const db = getDb();
   const id = idParam(req.params.id);
-  const p = getProduct(db, id);
-  if (!p) throw notFound('Product not found');
-  if (p.image_path) {
-    db.prepare('UPDATE products SET image_path = NULL, updated_at = ? WHERE id = ?').run(nowIso(), id);
-    fs.rm(path.join(config.uploadsDir, p.image_path), { force: true }, () => {});
-    audit(db, actorOf(req), {
+  await db.tx(async (t) => {
+    const p = await getProduct(t, id);
+    if (!p) throw notFound('Product not found');
+    if (!p.image_path) return;
+    await t.run('UPDATE products SET image_path = NULL, updated_at = ? WHERE id = ?', nowIso(), id);
+    await t.run('DELETE FROM product_images WHERE name = ?', p.image_path);
+    await audit(t, actorOf(req), {
       action: 'PRODUCT.IMAGE',
       entityType: 'product',
       entityId: id,
       productId: id,
       description: `${req.user!.username} removed the photo of ${p.sku}.`,
     });
-  }
-  res.json({ data: serializeProduct(getProduct(db, id)!) });
+  });
+  res.json({ data: serializeProduct((await getProduct(db, id))!) });
 });

@@ -10,9 +10,9 @@ systemRouter.get('/update', (_req, res) => {
   res.json({ data: readUpdateStatus() });
 });
 
-systemRouter.post('/update/check', (req, res) => {
+systemRouter.post('/update/check', async (req, res) => {
   const actor = actorOf(req);
   requestUpdateCheck(actor.username);
-  audit(getDb(), actor, { action: 'SYSTEM.UPDATE_CHECK', entityType: 'system', description: `${actor.username} asked the server to check for updates.` });
+  await audit(getDb(), actor, { action: 'SYSTEM.UPDATE_CHECK', entityType: 'system', description: `${actor.username} asked the server to check for updates.` });
   res.status(202).json({ data: readUpdateStatus() });
 });

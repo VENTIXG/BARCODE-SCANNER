@@ -17,18 +17,18 @@ export function parseLocationCode(code: string) {
 }
 
 /** Find a location by code in a warehouse, creating it if it does not exist. */
-export function findOrCreateLocation(db: DB, warehouseId: number, rawCode: string): number | null {
+export async function findOrCreateLocation(db: DB, warehouseId: number, rawCode: string): Promise<number | null> {
   const code = normalizeLocationCode(rawCode);
   if (!code) return null;
-  const existing = db
-    .prepare('SELECT id FROM warehouse_locations WHERE warehouse_id = ? AND code = ?')
-    .pluck()
-    .get(warehouseId, code) as number | undefined;
+  const existing = await db.value<number>('SELECT id FROM warehouse_locations WHERE warehouse_id = ? AND code = ?', warehouseId, code);
   if (existing) return existing;
   const { zone, rack, shelf } = parseLocationCode(code);
-  return Number(
-    db
-      .prepare('INSERT INTO warehouse_locations (warehouse_id, code, zone, rack, shelf) VALUES (?, ?, ?, ?, ?)')
-      .run(warehouseId, code, zone, rack, shelf).lastInsertRowid,
-  );
+  return (await db.value<number>(
+    'INSERT INTO warehouse_locations (warehouse_id, code, zone, rack, shelf) VALUES (?, ?, ?, ?, ?) RETURNING id',
+    warehouseId,
+    code,
+    zone,
+    rack,
+    shelf,
+  )) as number;
 }

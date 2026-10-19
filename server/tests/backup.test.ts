@@ -4,16 +4,16 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
-import { getDb } from '../src/db/index.js';
+import { getDb, initDb } from '../src/db/index.js';
 import { backupDue } from '../src/lib/backup.js';
 
 const app = createApp();
 const admin = request.agent(app);
 
-const productCount = () => getDb().prepare('SELECT COUNT(*) FROM products').pluck().get() as number;
+const productCount = async () => (await getDb().value<number>('SELECT COUNT(*) FROM products')) ?? 0;
 
 beforeAll(async () => {
-  getDb();
+  await initDb();
   expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
 });
 
@@ -30,7 +30,7 @@ describe('first run', () => {
     expect((await admin.post('/api/settings/demo-data')).status).toBe(409);
     // An empty-database backup was taken first, so the demo data can be removed again.
     const list = await admin.get('/api/backups');
-    expect(list.body.data.files.some((f: { name: string }) => f.name.endsWith('_before-demo.db'))).toBe(true);
+    expect(list.body.data.files.some((f: { name: string }) => f.name.endsWith('_before-demo.json.gz'))).toBe(true);
     // The admin password was not overwritten by the demo users.
     expect((await request(app).post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
     expect((await request(app).post('/api/auth/login').send({ username: 'manager', password: 'manager123' })).status).toBe(200);
@@ -41,27 +41,27 @@ describe('backups', () => {
   let backupName = '';
 
   it('creates a backup and lists it', async () => {
-    getDb().prepare(`UPDATE settings SET value = '' WHERE key = 'last_backup_at'`).run();
-    expect(backupDue()).toBe(true);
+    await getDb().run(`UPDATE settings SET value = '' WHERE key = 'last_backup_at'`);
+    expect(await backupDue()).toBe(true);
     const res = await admin.post('/api/backups');
     expect(res.status).toBe(201);
     backupName = res.body.data.name;
-    expect(backupName).toMatch(/^inventory_.*_manual\.db$/);
-    expect(backupDue()).toBe(false);
+    expect(backupName).toMatch(/^inventory_.*_manual\.json\.gz$/);
+    expect(await backupDue()).toBe(false);
     const list = await admin.get('/api/backups');
     expect(list.body.data.files.map((f: { name: string }) => f.name)).toContain(backupName);
     expect(fs.existsSync(path.join(config.dataDir, 'backups', backupName))).toBe(true);
   });
 
   it('restores a backup and signs everyone out', async () => {
-    const before = productCount();
+    const before = await productCount();
     await admin.post('/api/products').send({ sku: 'AFTER-BACKUP', name: 'Created after the backup' });
-    expect(productCount()).toBe(before + 1);
+    expect(await productCount()).toBe(before + 1);
 
     const res = await admin.post(`/api/backups/${backupName}/restore`);
     expect(res.status).toBe(200);
-    expect(res.body.data.safetyBackup).toMatch(/_before-restore\.db$/);
-    expect(productCount()).toBe(before);
+    expect(res.body.data.safetyBackup).toMatch(/_before-restore\.json\.gz$/);
+    expect(await productCount()).toBe(before);
     // Old session is no longer valid after a restore.
     expect((await admin.get('/api/products')).status).toBe(401);
     expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);

@@ -17,8 +17,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getDb, nowIso, type DB } from '../db/index.js';
-import { BACKUP_FILE_RE, backupDir, listBackups, onBackup } from './backup.js';
+import { getDb, nowIso, putSetting, type DB } from '../db/index.js';
+import { BACKUP_FILE_RE, backupDir, defaultBackupDir, listBackupsIn, onBackup } from './backup.js';
 import { badRequest } from './errors.js';
 import { S3Client, type S3Config } from './s3.js';
 
@@ -85,15 +85,8 @@ export function decryptBackup(data: Buffer, passphrase: string): Buffer {
 
 // ---- Status (kept in settings; no secrets) --------------------------------------------------
 
-function putSetting(db: DB, key: string, value: string) {
-  db.prepare(
-    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-  ).run(key, value, nowIso());
-}
-
-const readSetting = (db: DB, key: string) =>
-  (db.prepare('SELECT value FROM settings WHERE key = ?').pluck().get(key) as string | undefined) || null;
+const readSetting = async (db: DB, key: string) =>
+  (await db.value<string>('SELECT value FROM settings WHERE key = ?', key)) || null;
 
 export interface OffsiteStatus {
   configured: boolean;
@@ -108,7 +101,7 @@ export interface OffsiteStatus {
   lastErrorAt: string | null;
 }
 
-export function offsiteStatus(db: DB = getDb()): OffsiteStatus {
+export async function offsiteStatus(db: DB = getDb()): Promise<OffsiteStatus> {
   const s = offsiteSettings();
   return {
     configured: Boolean(s),
@@ -117,10 +110,10 @@ export function offsiteStatus(db: DB = getDb()): OffsiteStatus {
     prefix: s?.prefix ?? null,
     encrypted: Boolean(s?.passphrase),
     keep: s?.keep ?? null,
-    lastUploadAt: readSetting(db, 'offsite_last_upload_at'),
-    lastFile: readSetting(db, 'offsite_last_file'),
-    lastError: s ? readSetting(db, 'offsite_last_error') : null,
-    lastErrorAt: s ? readSetting(db, 'offsite_last_error_at') : null,
+    lastUploadAt: await readSetting(db, 'offsite_last_upload_at'),
+    lastFile: await readSetting(db, 'offsite_last_file'),
+    lastError: s ? await readSetting(db, 'offsite_last_error') : null,
+    lastErrorAt: s ? await readSetting(db, 'offsite_last_error_at') : null,
   };
 }
 
@@ -186,24 +179,25 @@ export function syncOffsite(db: DB = getDb()): Promise<{ uploaded: string[] }> {
     try {
       const remote = await listRemote(s);
       const newestRemote = remote[0]?.name ?? '';
-      const local = listBackups(db);
+      const dir = await backupDir(db);
+      const local = listBackupsIn(dir);
       const pending = (newestRemote ? local.filter((f) => f.name > newestRemote) : local.slice(0, 1)).reverse();
       for (const f of pending) {
-        await upload(s, path.join(backupDir(db), f.name), f.name);
+        await upload(s, path.join(dir, f.name), f.name);
         uploaded.push(f.name);
-        putSetting(db, 'offsite_last_upload_at', nowIso());
-        putSetting(db, 'offsite_last_file', f.name);
+        await putSetting(db, 'offsite_last_upload_at', nowIso());
+        await putSetting(db, 'offsite_last_file', f.name);
       }
       if (uploaded.length || remote.length > s.keep) {
         const client = new S3Client(s.s3);
         for (const old of (await listRemote(s)).slice(s.keep)) await client.deleteObject(old.key);
       }
-      putSetting(db, 'offsite_last_error', '');
+      await putSetting(db, 'offsite_last_error', '');
       return { uploaded };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      putSetting(db, 'offsite_last_error', message.slice(0, 500));
-      putSetting(db, 'offsite_last_error_at', nowIso());
+      await putSetting(db, 'offsite_last_error', message.slice(0, 500)).catch(() => {});
+      await putSetting(db, 'offsite_last_error_at', nowIso()).catch(() => {});
       throw e;
     }
   })().finally(() => {
@@ -239,7 +233,8 @@ export function stopOffsiteSync() {
  * Fetch a copy from the bucket into the backups folder (decrypted) and return its path.
  * An identical local file is reused.
  */
-export async function downloadRemote(name: string, db: DB = getDb()): Promise<string> {
+/** db null: no database yet (a new server restoring from the cloud), use the default folder. */
+export async function downloadRemote(name: string, db: DB | null = getDb()): Promise<string> {
   if (!BACKUP_FILE_RE.test(name)) throw badRequest('Invalid backup file name');
   const s = requireSettings();
   const found = (await listRemote(s)).find((r) => r.name === name);
@@ -249,7 +244,7 @@ export async function downloadRemote(name: string, db: DB = getDb()): Promise<st
     if (!s.passphrase) throw badRequest('This copy is encrypted: set BACKUP_PASSPHRASE on the server first', 'OFFSITE_PASSPHRASE');
     data = decryptBackup(data, s.passphrase);
   }
-  const dir = backupDir(db);
+  const dir = db ? await backupDir(db) : defaultBackupDir();
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, name);
   if (!fs.existsSync(file) || fs.statSync(file).size !== data.length) {
