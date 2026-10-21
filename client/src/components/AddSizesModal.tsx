@@ -42,13 +42,13 @@ export function AddSizesModal({ product, open, onClose }: { product: Product; op
     setRows((prev) =>
       parsed.map((size) => {
         const old = prev.find((r) => r.size === size);
-        return old ?? { size, sku: `${product.sku}-${size}`.replace(/\s+/g, '-').toUpperCase(), barcode: '', initialQuantity: '0' };
+        return old ?? { size, sku: `${product.sku}-${size}`.toUpperCase(), barcode: '', initialQuantity: '0' };
       }),
     );
   }, [parsed, product.sku]);
 
   const update = (i: number, patch: Partial<Row>) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-  const valid = rows.length > 0 && rows.every((r) => r.size.trim() && r.sku.trim() && !/\s/.test(r.sku.trim()) && Number(r.initialQuantity) >= 0);
+  const valid = rows.length > 0 && rows.every((r) => r.size.trim() && r.sku.trim() && Number(r.initialQuantity) >= 0);
 
   const save = useMutation({
     mutationFn: () =>
@@ -111,7 +111,6 @@ export function AddSizesModal({ product, open, onClose }: { product: Product; op
             </div>
           ))}
         </div>
-        <ErrorBox error={rows.some((r) => /\s/.test(r.sku)) ? t('No spaces allowed') : null} />
       </div>
     </Modal>
   );

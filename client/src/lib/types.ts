@@ -43,7 +43,8 @@ export interface Product {
   locationId: number | null;
   locationCode: string | null;
   purchasePrice: number;
-  sellingPrice: number;
+  /** null: no selling price set. */
+  sellingPrice: number | null;
   imageUrl: string | null;
   status: 'ACTIVE' | 'INACTIVE';
   stockStatus: StockStatus;
@@ -123,6 +124,9 @@ export interface DocumentLine {
   barcode: string | null;
   name: string;
   unit: string;
+  /** Receipts from a supplier invoice: the line as printed on the invoice. */
+  invoice_description?: string | null;
+  supplier_code?: string | null;
 }
 
 export interface StockDocument {

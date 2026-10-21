@@ -119,9 +119,13 @@ export function parseLine(raw: InvoiceLineInput, errors: string[], warnings: str
   if (!description && !sku && !barcode) errors.push('The line has no description or code');
   if (quantity === null) errors.push('Quantity is missing');
   else if (quantity <= 0) errors.push('Quantity must be greater than zero');
-  if (unitPrice === null && lineTotal !== null && quantity) {
-    unitPrice = Math.round((lineTotal / quantity) * 10000) / 10000;
-    warnings.push('Unit price calculated from the line total');
+  if (lineTotal !== null && quantity && quantity > 0) {
+    // The net value of the line is what the goods cost (after any discount).
+    const net = Math.round((lineTotal / quantity) * 10000) / 10000;
+    if (unitPrice === null) warnings.push('Unit price calculated from the line total');
+    else if (Math.abs(net - unitPrice) > Math.max(0.005, unitPrice * 0.005))
+      warnings.push(`Unit price ${unitPrice} on the invoice; ${net} after discount (net value / quantity) is used`);
+    unitPrice = net;
   }
   if (unitPrice !== null && unitPrice < 0) {
     errors.push('Unit price cannot be negative');

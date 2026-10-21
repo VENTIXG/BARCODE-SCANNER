@@ -3,7 +3,7 @@
  * One editor for both: scan / search products into lines, then confirm to
  * post all stock movements in a single transaction.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
@@ -45,6 +45,8 @@ import {
 
 type Kind = 'receipt' | 'dispatch';
 
+const InvoiceImport = lazy(() => import('./InvoiceImport'));
+
 interface Line {
   key: string;
   product: Product;
@@ -79,8 +81,9 @@ const parseQty = (s: string) => Number(String(s).replace(',', '.'));
 export default function StockDocumentPage({ kind }: { kind: Kind }) {
   const t = useT();
   const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') === 'history' ? 'history' : 'new';
   const isIn = kind === 'receipt';
+  const raw = params.get('tab');
+  const tab = raw === 'history' ? 'history' : raw === 'invoice' && isIn ? 'invoice' : 'new';
   return (
     <div>
       <PageHeader
@@ -89,13 +92,22 @@ export default function StockDocumentPage({ kind }: { kind: Kind }) {
       />
       <Tabs
         value={tab}
-        onChange={(v) => setParams(v === 'history' ? { tab: 'history' } : {}, { replace: true })}
+        onChange={(v) => setParams(v === 'new' ? {} : { tab: v }, { replace: true })}
         tabs={[
           { value: 'new', label: isIn ? t('New receipt') : t('New dispatch') },
+          ...(isIn ? [{ value: 'invoice' as const, label: t('From supplier invoice') }] : []),
           { value: 'history', label: isIn ? t('Receipt history') : t('Dispatch history') },
         ]}
       />
-      {tab === 'new' ? <Editor kind={kind} /> : <History kind={kind} />}
+      {tab === 'new' ? (
+        <Editor kind={kind} />
+      ) : tab === 'invoice' ? (
+        <Suspense fallback={<LoadingBlock />}>
+          <InvoiceImport />
+        </Suspense>
+      ) : (
+        <History kind={kind} />
+      )}
     </div>
   );
 }
@@ -160,7 +172,7 @@ function Editor({ kind }: { kind: Kind }) {
       setLastKey(key);
       return {
         ...d,
-        lines: [...d.lines, { key, product: p, quantity: String(qty), unitPrice: String(isIn ? p.purchasePrice : p.sellingPrice) }],
+        lines: [...d.lines, { key, product: p, quantity: String(qty), unitPrice: String((isIn ? p.purchasePrice : p.sellingPrice) ?? '') }],
       };
     });
     picker.current?.focus();

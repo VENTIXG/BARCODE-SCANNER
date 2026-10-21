@@ -117,7 +117,7 @@ export default function ProductForm() {
       unit: p.unit,
       minStock: String(p.minStock),
       purchasePrice: String(p.purchasePrice),
-      sellingPrice: String(p.sellingPrice),
+      sellingPrice: p.sellingPrice == null ? '' : String(p.sellingPrice),
       status: p.status,
       locationCode: p.locationCode ?? '',
       initialQuantity: '',
@@ -156,7 +156,8 @@ export default function ProductForm() {
         unit: f.unit,
         minStock: num(f.minStock),
         purchasePrice: num(f.purchasePrice),
-        sellingPrice: num(f.sellingPrice),
+        // Empty = no selling price (not 0).
+        sellingPrice: f.sellingPrice.trim() === '' ? null : num(f.sellingPrice),
         status: f.status,
         locationCode: f.locationCode.trim() || null,
         confirmDuplicateBarcode,
@@ -175,7 +176,8 @@ export default function ProductForm() {
   });
 
   const numbersInvalid = [f.minStock, f.purchasePrice, f.sellingPrice, f.initialQuantity].some((v) => v.trim() !== '' && (Number.isNaN(num(v)) || num(v) < 0));
-  const canSubmit = f.sku.trim() && f.name.trim() && !/\s/.test(f.sku.trim()) && !unique.data?.sku && !numbersInvalid;
+  // SKUs may contain spaces (kept as typed); tabs and line breaks cannot be typed in the field.
+  const canSubmit = f.sku.trim() && f.name.trim() && !unique.data?.sku && !numbersInvalid;
 
   if (isEdit && (existing.isLoading || !loaded)) return <LoadingBlock />;
 
@@ -207,7 +209,12 @@ export default function ProductForm() {
         <Card>
           <CardHeader title={t('Identification')} />
           <div className="grid gap-4 p-4 sm:grid-cols-2">
-            <Field label="SKU" required error={unique.data?.sku ? t('Already used by {name}', { name: unique.data.sku.name }) : /\s/.test(f.sku.trim()) ? t('No spaces allowed') : undefined}>
+            <Field
+              label="SKU"
+              required
+              hint={t('Spaces are allowed; spacing and letter case do not make a different SKU')}
+              error={unique.data?.sku ? t('Already used by {name}', { name: `${unique.data.sku.name} (${unique.data.sku.sku})` }) : undefined}
+            >
               <Input value={f.sku} onChange={set('sku')} onKeyDown={noEnter} className="font-mono" invalid={Boolean(unique.data?.sku)} autoFocus={!isEdit} maxLength={64} />
             </Field>
             <Field
@@ -296,8 +303,8 @@ export default function ProductForm() {
             <Field label={t('Purchase price')}>
               <Input inputMode="decimal" value={f.purchasePrice} onChange={set('purchasePrice')} className="tabular" placeholder="0,00" />
             </Field>
-            <Field label={t('Selling price')}>
-              <Input inputMode="decimal" value={f.sellingPrice} onChange={set('sellingPrice')} className="tabular" placeholder="0,00" />
+            <Field label={t('Selling price')} hint={t('Optional: empty = not set')}>
+              <Input inputMode="decimal" value={f.sellingPrice} onChange={set('sellingPrice')} className="tabular" placeholder="—" />
             </Field>
           </div>
           {numbersInvalid && <div className="px-4 pb-4"><ErrorBox error={t('Numbers must be zero or positive.')} /></div>}

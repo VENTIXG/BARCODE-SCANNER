@@ -77,6 +77,14 @@ describe('matching invoice lines', () => {
     expect(at(6).candidates[0]).toMatchObject({ product: { id: ids.foreign }, by: 'sku' });
   });
 
+  it('with a discount, the net value of the line gives the unit cost', async () => {
+    const res = await admin
+      .post('/api/invoices/match')
+      .send({ supplierId: supplier, lines: [{ lineNo: 1, description: 'COLA 330ML', quantity: '1200', unitPrice: '2.10', lineTotal: '2268.00' }] });
+    expect(res.body.data.lines[0].line).toMatchObject({ quantity: 1200, unitPrice: 1.89 });
+    expect(res.body.data.lines[0].warnings.join(' ')).toMatch(/after discount/);
+  });
+
   it('a different size is never similar ("500ML" is not "1L")', async () => {
     const res = await admin.post('/api/invoices/match').send({ supplierId: supplier, lines: [{ lineNo: 1, description: 'ΝΕΡΟ 1L', quantity: 1 }] });
     expect(res.body.data.lines[0]).toMatchObject({ status: 'new', candidates: [] });

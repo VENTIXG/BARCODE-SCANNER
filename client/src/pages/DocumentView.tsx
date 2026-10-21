@@ -111,10 +111,16 @@ export default function DocumentView({ kind }: { kind: 'receipt' | 'dispatch' })
             {doc.items?.map((it, i) => (
               <tr key={it.id}>
                 <Td className="text-muted">{i + 1}</Td>
-                <Td className="font-mono text-xs">{it.sku}</Td>
-                <Td className="font-mono text-xs">{it.barcode ?? '—'}</Td>
+                <Td className="whitespace-pre font-mono text-xs">{it.sku}</Td>
+                <Td className="whitespace-pre font-mono text-xs">{it.barcode ?? '—'}</Td>
                 <Td>
                   <Link to={`/products/${it.product_id}`} className="hover:underline">{it.name}</Link>
+                  {it.invoice_description && it.invoice_description !== it.name && (
+                    <div className="whitespace-pre-wrap text-xs text-muted">
+                      {t('On the invoice')}: {it.invoice_description}
+                      {it.supplier_code && ` · ${it.supplier_code}`}
+                    </div>
+                  )}
                 </Td>
                 <Td align="right" className="tabular font-medium">{fmtQty(it.quantity, it.unit)}</Td>
                 <Td align="right" className="tabular">{it.unit_price != null ? fmtMoney(it.unit_price) : '—'}</Td>

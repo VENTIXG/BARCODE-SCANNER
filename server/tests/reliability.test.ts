@@ -171,6 +171,30 @@ describe('real-time events', () => {
 });
 
 describe('migrations never lose data', () => {
+  it('1.3 to 1.4 (schema 101): data kept, selling prices kept, SKUs that differ only in spacing tolerated', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig101-'));
+    const db = await connect({ url: 'memory://' });
+    try {
+      await migrate(db, migrations.filter((m) => m.version === 100), dir);
+      await db.exec(`INSERT INTO warehouses (code, name, is_default) VALUES ('MAIN', 'Main', 1);
+        INSERT INTO products (sku, name, purchase_price, selling_price) VALUES ('A B', 'One', 1, 2), ('A  B', 'Two', 3, 0);
+        INSERT INTO stock_receipts (receipt_number, warehouse_id, receipt_date, invoice_number) VALUES ('RCV-1', 1, '2026-10-01', 'INV 1');`);
+      await migrate(db, migrations, dir);
+      expect(fs.readdirSync(dir).filter((f) => f.includes('before-migrate-v101'))).toHaveLength(1);
+      expect(await db.all('SELECT sku::text AS sku, purchase_price, selling_price FROM products ORDER BY id')).toEqual([
+        { sku: 'A B', purchase_price: 1, selling_price: 2 },
+        { sku: 'A  B', purchase_price: 3, selling_price: 0 },
+      ]);
+      // Existing duplicates by spacing: the index is created without UNIQUE; the application refuses new ones.
+      expect(await db.value("SELECT indexdef FROM pg_indexes WHERE indexname = 'ux_products_sku_key'")).not.toMatch(/UNIQUE/);
+      await db.run("INSERT INTO products (sku, name) VALUES ('C', 'No selling price')");
+      expect(await db.value("SELECT selling_price FROM products WHERE sku = 'C'")).toBeNull();
+      expect(await db.value("SELECT COUNT(*) FROM stock_receipts WHERE ims_compact(invoice_number) = ims_compact('inv1')")).toBe(1);
+    } finally {
+      await db.close();
+    }
+  }, 30_000);
+
   it('a failing migration rolls back and leaves a copy from before the upgrade', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mig-'));
     const db = await connect({ url: 'memory://' });

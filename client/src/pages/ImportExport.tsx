@@ -33,7 +33,7 @@ type FieldKey = (typeof FIELDS)[number]['key'];
 /** Header synonyms (English + Greek) used for automatic column detection. */
 const SYNONYMS: Record<FieldKey, string[]> = {
   sku: ['sku', 'code', 'item code', 'product code', 'article', 'κωδικος', 'κωδικος ειδους', 'κωδ', 'κωδικος προιοντος'],
-  barcode: ['barcode', 'bar code', 'ean', 'ean13', 'upc', 'gtin', 'ean upc', 'barcode ean', 'γραμμωτος κωδικας'],
+  barcode: ['barcode', 'barcode number', 'bar code', 'ean', 'ean13', 'upc', 'gtin', 'ean upc', 'barcode ean', 'γραμμωτος κωδικας', 'αριθμος barcode'],
   name: ['product name', 'name', 'item name', 'product', 'item', 'title', 'ονομα', 'ονομασια', 'ονομα προιοντος', 'ειδος', 'περιγραφη ειδους'],
   description: ['description', 'details', 'περιγραφη', 'σχολια'],
   category: ['category', 'group', 'product group', 'κατηγορια', 'ομαδα'],
@@ -82,10 +82,15 @@ interface Parsed {
   fileName: string;
   sheets: string[];
   sheet: string;
-  headerRow: number; // 0-based index in the sheet
+  headerRow: number; // 0-based index in the sheet; -1: no header row
   headers: string[];
   rows: unknown[][];
+  noHeader?: boolean;
 }
+
+/** The standard file: A SKU | B Barcode Number | C Quantity | D Purchase Price | E Selling Price. */
+const STANDARD: FieldKey[] = ['sku', 'barcode', 'quantity', 'purchasePrice', 'sellingPrice'];
+const COLUMN_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 function parseSheet(wb: XLSX.WorkBook, fileName: string, sheet: string): Parsed {
   const data = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheet], { header: 1, raw: true, defval: null, blankrows: false });
@@ -93,20 +98,34 @@ function parseSheet(wb: XLSX.WorkBook, fileName: string, sheet: string): Parsed 
   let headerRow = data.findIndex((r) => r.filter((c) => c !== null && String(c).trim() !== '').length >= 2);
   if (headerRow < 0) headerRow = 0;
   const width = Math.max(0, ...data.map((r) => r.length));
+  const cells = (data[headerRow] ?? []).map((h) => (h == null ? '' : String(h).trim()));
+  // No header row at all (the file starts with data): the five standard columns by position.
+  const isNumber = (v: unknown) => typeof v === 'number' || (typeof v === 'string' && /^\s*-?[\d.,]+\s*$/.test(v) && /\d/.test(v));
+  const noHeader =
+    width <= STANDARD.length &&
+    autoMap(cells).every((m) => !m) &&
+    [2, 3, 4].some((i) => isNumber(data[headerRow]?.[i]));
+  if (noHeader) headerRow = -1;
   const headers = Array.from({ length: width }, (_, i) => {
+    if (noHeader) return `${t_column(i)}`;
     const h = data[headerRow]?.[i];
-    return h == null || String(h).trim() === '' ? `Column ${i + 1}` : String(h).trim();
+    return h == null || String(h).trim() === '' ? t_column(i) : String(h).trim();
   });
   const rows = data.slice(headerRow + 1).filter((r) => r.some((c) => c !== null && String(c).trim() !== ''));
-  return { fileName, sheets: wb.SheetNames, sheet, headerRow, headers, rows };
+  return { fileName, sheets: wb.SheetNames, sheet, headerRow, headers, rows, noHeader };
 }
+
+const t_column = (i: number) => `Column ${COLUMN_LETTERS[i] ?? i + 1}`;
+
+/** Detected columns; a file without headers gets the standard order A-E. */
+const mappingFor = (p: Parsed): (FieldKey | '')[] => (p.noHeader ? p.headers.map((_, i) => STANDARD[i] ?? '') : autoMap(p.headers));
 
 interface RowResult {
   rowNumber: number;
   status: 'new' | 'existing' | 'error';
   errors: string[];
   warnings: string[];
-  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' };
+  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' | 'name' };
 }
 
 interface ValidateResponse {
@@ -201,12 +220,13 @@ function ImportWizard() {
     }
     try {
       const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array', cellDates: false, codepage: 65001 });
+      // CSV: cells stay text, so leading zeros of codes and decimal commas are kept (the server reads numbers).
+      const wb = XLSX.read(buf, { type: 'array', cellDates: false, codepage: 65001, raw: /\.csv$/i.test(file.name) });
       workbook.current = wb;
       const p = parseSheet(wb, file.name, wb.SheetNames[0]);
       if (!p.rows.length) throw new Error(t('The file has no data rows'));
       setParsed(p);
-      setMapping(autoMap(p.headers));
+      setMapping(mappingFor(p));
       setStep(1);
     } catch (e) {
       setParseError(errMsg(e));
@@ -217,7 +237,7 @@ function ImportWizard() {
     if (!workbook.current || !parsed) return;
     const p = parseSheet(workbook.current, parsed.fileName, sheet);
     setParsed(p);
-    setMapping(autoMap(p.headers));
+    setMapping(mappingFor(p));
   };
 
   /** Build API rows from the mapping; rowNumber = Excel row number. */
@@ -300,9 +320,15 @@ function ImportWizard() {
             <Button className="mt-4 w-full" icon={<Download className="size-4" />} onClick={() => download('/import/template').catch((e) => toast.error(errMsg(e)))}>
               {t('Download Excel Template')}
             </Button>
+            <button type="button" className="mt-2 w-full text-center text-xs text-brand-fg underline" onClick={() => download('/import/template', { layout: 'full' }).catch((e) => toast.error(errMsg(e)))}>
+              {t('Template with every product field')}
+            </button>
             <div className="mt-5 border-t border-line pt-4 text-xs text-muted">
-              <p className="mb-1 font-medium text-fg-2">{t('Supported columns')}</p>
-              <p>{FIELDS.map((f) => f.label).join(' · ')}</p>
+              <p className="mb-1 font-medium text-fg-2">{t('Standard columns')}</p>
+              <p className="font-mono">A {t('SKU')} · B {t('Barcode Number')} · C {t('Quantity')} · D {t('Purchase Price')} · E {t('Selling Price')}</p>
+              <p className="mt-2">{t('SKUs and descriptions may contain spaces. Column A may hold the SKU or the product description. An empty selling price stays empty.')}</p>
+              <p className="mb-1 mt-3 font-medium text-fg-2">{t('Also accepted')}</p>
+              <p>{FIELDS.map((f) => t(f.label)).join(' · ')}</p>
               <p className="mt-3">{t('Columns are detected automatically (English or Greek headers); you can adjust the mapping in the next step.')}</p>
             </div>
           </Card>
@@ -548,14 +574,20 @@ function PreviewTable({
                       <Badge tone="brand">{strategy === 'update' ? t('Update') : t('Skip')}</Badge>
                     ))}
                 </Td>
-                <Td className="font-mono text-xs">{cell(d.sku)}</Td>
-                <Td className="font-mono text-xs">{cell(d.barcode)}</Td>
+                <Td className="whitespace-pre font-mono text-xs">{cell(d.sku)}</Td>
+                <Td className="whitespace-pre font-mono text-xs">{cell(d.barcode)}</Td>
                 <Td className="max-w-[240px] truncate">{cell(d.name ?? r.match?.name)}</Td>
                 <Td align="right" className="tabular">{cell(d.quantity)}</Td>
                 <Td className="text-xs">
                   {r.errors.map((e) => <div key={e} className="text-bad">{e}</div>)}
                   {r.warnings.map((w) => <div key={w} className="text-warn">{w}</div>)}
-                  {r.match && <div className="text-muted">{t('Existing')}: <Link to={`/products/${r.match.id}`} className="underline">{r.match.sku}</Link></div>}
+                  {r.match && (
+                    <div className="text-muted">
+                      {t('Existing')}: <Link to={`/products/${r.match.id}`} className="whitespace-pre underline">{r.match.sku}</Link>
+                      {r.match.matchedBy === 'name' && <> · {t('found by description')}</>}
+                      {r.match.matchedBy === 'barcode' && <> · {t('found by barcode')}</>}
+                    </div>
+                  )}
                 </Td>
               </tr>
             );
@@ -587,7 +619,8 @@ function ExportPanel() {
   const dateRange = { from: from || undefined, to: to || undefined };
 
   const simple = [
-    { key: 'products', title: t('All products'), desc: t('Every product, in the import template layout (edit and re-import).'), url: '/export/products' },
+    { key: 'products', title: t('All products'), desc: t('SKU | Barcode Number | Quantity | Purchase Price | Selling Price (edit and re-import).'), url: '/export/products' },
+    { key: 'products-full', title: t('All products — every field'), desc: t('Name, description, category, supplier, location, prices and status as well.'), url: '/export/products-full' },
     { key: 'inventory', title: t('Current inventory'), desc: t('Stock per product with location and value, sorted by location.'), url: '/export/inventory' },
     { key: 'low', title: t('Low stock products'), desc: t('Products at or below minimum stock, with suggested order quantity.'), url: '/export/low-stock' },
     { key: 'cat', title: t('Products by category'), desc: t('Summary sheet plus one sheet per category.'), url: '/export/grouped/category' },

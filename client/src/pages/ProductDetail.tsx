@@ -174,7 +174,7 @@ export default function ProductDetail() {
               <Info label={t('Purchase price')}>{fmtMoney(p.purchasePrice)}</Info>
               <Info label={t('Selling price')}>{fmtMoney(p.sellingPrice)}</Info>
               <Info label={t('Margin')}>
-                {p.purchasePrice > 0 ? `${Math.round(((p.sellingPrice - p.purchasePrice) / p.purchasePrice) * 100)}%` : '—'}
+                {p.purchasePrice > 0 && p.sellingPrice != null ? `${Math.round(((p.sellingPrice - p.purchasePrice) / p.purchasePrice) * 100)}%` : '—'}
               </Info>
               <Info label={t('Created')}>{fmtDate(p.createdAt)}</Info>
               <Info label={t('Last updated')}>{fmtDateTime(p.updatedAt)}</Info>
