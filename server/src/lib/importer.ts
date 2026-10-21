@@ -4,10 +4,17 @@
  * The browser parses the file and maps columns; the server validates every row
  * (types, required fields, duplicates inside the file and against the
  * database) and then imports the valid rows in one database transaction.
+ *
+ * The standard file has five columns: SKU | Barcode Number | Quantity | Purchase Price |
+ * Selling Price. Older files with more columns (name, category, ...) still work. A row finds
+ * its product by SKU (spaces and letter case do not matter), by barcode, or, when the SKU
+ * column holds a product description, by that description. SKUs and descriptions are stored
+ * exactly as in the file.
  */
 import { getDefaultWarehouseId, normalizeText, nowIso, type DB } from '../db/index.js';
 import { audit, type Actor } from './audit.js';
 import { findOrCreateLocation } from './locations.js';
+import { cleanText, keysFor, loadCatalog, type CatalogProduct } from './matching.js';
 import { adjustToCount, applyStockChange, round3, setProductLocation } from './stock.js';
 
 export const IMPORT_FIELDS = [
@@ -59,17 +66,14 @@ export interface RowResult {
   status: 'new' | 'existing' | 'error';
   errors: string[];
   warnings: string[];
-  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' };
+  /** keepSku: matched by barcode, and the SKU column holds the product's description, not a new SKU. */
+  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' | 'name'; keepSku?: boolean };
   data?: CleanRow;
 }
 
-/** Text cell: numbers from Excel are converted without exponent notation. */
-function text(v: unknown): string | null {
-  if (v === undefined || v === null) return null;
-  if (typeof v === 'number') return Number.isInteger(v) ? v.toFixed(0) : String(v);
-  const s = String(v).trim();
-  return s === '' ? null : s;
-}
+/** Text cell: numbers from Excel are converted without exponent notation; inner spaces kept. */
+const text = cleanText;
+const CONTROL = /[\u0000-\u001f\u007f]/;
 
 /** Accepts 12.5, "12,5", "1.234,56", "1,234.56", "€ 12,00". */
 export function parseNumber(v: unknown): number | null | typeof NaN {
@@ -112,12 +116,15 @@ function cleanRow(raw: RawRow, errors: string[], warnings: string[]): CleanRow {
   };
   const sku = text(raw.sku);
   const barcode = text(raw.barcode);
-  if (!sku) errors.push('SKU is required');
-  else if (/\s/.test(sku)) errors.push('SKU must not contain spaces');
-  else if (sku.length > 64) errors.push('SKU is too long (max 64)');
-  if (barcode && /\s/.test(barcode)) errors.push('Barcode must not contain spaces');
+  // SKUs and barcodes may contain spaces; they are kept exactly as in the file.
+  if (sku && CONTROL.test(sku)) errors.push('SKU contains a tab or line break');
+  else if (sku && sku.length > 64) errors.push('SKU is too long (max 64)');
+  if (barcode && CONTROL.test(barcode)) errors.push('Barcode contains a tab or line break');
   if (barcode && barcode.length > 64) errors.push('Barcode is too long (max 64)');
   if (barcode && /^\d+\.?\d*e\+\d+$/i.test(barcode)) errors.push('Barcode looks like scientific notation — format the column as Text in Excel');
+  // A number cell has no leading zeros any more (0123 became 123).
+  if (typeof raw.barcode === 'number') warnings.push('Barcode was a number cell in Excel: leading zeros may have been lost (format the column as Text)');
+  if (typeof raw.sku === 'number') warnings.push('SKU was a number cell in Excel: leading zeros may have been lost (format the column as Text)');
   const status = parseStatus(raw.status);
   if (status === undefined) {
     warnings.push(`Unknown status "${String(raw.status)}" — Active will be used`);
@@ -142,58 +149,90 @@ function cleanRow(raw: RawRow, errors: string[], warnings: string[]): CleanRow {
 }
 
 export async function validateRows(db: DB, rows: RawRow[]): Promise<RowResult[]> {
-  type Ref = { id: number; sku: string; name: string };
-  // One read of all products instead of two queries per row (SKU and barcode ignore case).
-  const existing = await db.all<Ref & { barcode: string | null }>('SELECT id, sku, name, barcode FROM products');
-  const skuIndex = new Map<string, Ref>();
-  const barcodeIndex = new Map<string, Ref[]>();
-  for (const p of existing) {
-    const ref = { id: p.id, sku: p.sku, name: p.name };
-    skuIndex.set(p.sku.toLowerCase(), ref);
-    if (p.barcode) {
-      const k = p.barcode.toLowerCase();
-      barcodeIndex.set(k, [...(barcodeIndex.get(k) ?? []), ref]);
-    }
-  }
-  const bySku = { get: (sku: string) => skuIndex.get(sku.toLowerCase()) };
-  const byBarcode = { all: (code: string) => barcodeIndex.get(code.toLowerCase()) ?? [] };
-  const seenSku = new Map<string, number>();
-  const seenBarcode = new Map<string, number>();
-  return rows.map((raw) => {
+  const catalog = await loadCatalog(db);
+  const cleaned = rows.map((raw) => {
     const errors: string[] = [];
     const warnings: string[] = [];
-    const data = cleanRow(raw, errors, warnings);
+    return { raw, errors, warnings, data: cleanRow(raw, errors, warnings) };
+  });
+  const keys = await keysFor(db, cleaned.flatMap((c) => [c.data.sku, c.data.barcode, c.data.name]));
+  const keyOf = (v: string | null) => (v ? (keys.get(v)?.key ?? '') : '');
+  const compactOf = (v: string | null) => (v ? (keys.get(v)?.compact ?? '') : '');
+  const ref = (p: CatalogProduct) => ({ id: p.id, sku: p.sku, name: p.name });
+  const seenSku = new Map<string, number>();
+  const seenBarcode = new Map<string, number>();
+  const seenProduct = new Map<number, number>();
+
+  return cleaned.map(({ raw, errors, warnings, data }) => {
     const result: RowResult = { rowNumber: raw.rowNumber, status: 'new', errors, warnings, data };
+    const skuKey = keyOf(data.sku);
+    const barcodeKey = compactOf(data.barcode);
+    if (!data.sku && !data.barcode) errors.push('SKU is required');
 
-    if (data.sku) {
-      const key = data.sku.toLowerCase();
-      const prev = seenSku.get(key);
+    // The same SKU twice in the file, also when written with different spacing.
+    if (skuKey) {
+      const prev = seenSku.get(skuKey);
       if (prev) errors.push(`Duplicate SKU in file (also on row ${prev})`);
-      else seenSku.set(key, raw.rowNumber);
+      else seenSku.set(skuKey, raw.rowNumber);
     }
-    if (data.barcode) {
-      const key = data.barcode.toLowerCase();
-      const prev = seenBarcode.get(key);
+    if (barcodeKey) {
+      const prev = seenBarcode.get(barcodeKey);
       if (prev) errors.push(`Duplicate barcode in file (also on row ${prev})`);
-      else seenBarcode.set(key, raw.rowNumber);
+      else seenBarcode.set(barcodeKey, raw.rowNumber);
     }
 
-    if (data.sku && !errors.length) {
-      const skuMatch = bySku.get(data.sku);
-      const barcodeMatches = data.barcode ? byBarcode.all(data.barcode) : [];
-      if (skuMatch) {
-        const foreign = barcodeMatches.filter((b) => b.id !== skuMatch.id);
+    if (!errors.length) {
+      const skuMatches = skuKey ? (catalog.bySkuKey.get(skuKey) ?? []) : [];
+      const barcodeMatches = barcodeKey ? (catalog.byBarcode.get(barcodeKey) ?? []) : [];
+      // The SKU column may hold a product description (or there is only a name column).
+      const descriptionKey = skuKey || keyOf(data.name);
+      const nameMatches = !skuMatches.length && descriptionKey ? (catalog.byNameKey.get(descriptionKey) ?? []) : [];
+      if (skuMatches.length) {
+        const p = skuMatches[0];
+        const foreign = barcodeMatches.filter((b) => b.id !== p.id);
         if (foreign.length)
           errors.push(`Barcode ${data.barcode} already belongs to another product (${foreign.map((f) => f.sku).join(', ')})`);
-        else result.match = { ...skuMatch, matchedBy: 'sku' };
+        else result.match = { ...ref(p), matchedBy: 'sku' };
       } else if (barcodeMatches.length === 1) {
-        result.match = { ...barcodeMatches[0], matchedBy: 'barcode' };
-        warnings.push(`Matched existing product by barcode; SKU would change from ${barcodeMatches[0].sku} to ${data.sku}`);
+        const p = barcodeMatches[0];
+        const keepSku = !data.sku || keyOf(data.sku) === p.name_key;
+        result.match = { ...ref(p), matchedBy: 'barcode', keepSku };
+        if (!keepSku) warnings.push(`Matched existing product by barcode; SKU would change from ${p.sku} to ${data.sku}`);
       } else if (barcodeMatches.length > 1) {
         errors.push(`Barcode ${data.barcode} is shared by several products (${barcodeMatches.map((b) => b.sku).join(', ')})`);
+      } else if (nameMatches.length === 1 && (!data.sku || !data.name || keyOf(data.name) === descriptionKey)) {
+        // Same description (spaces, accents and letter case ignored) as exactly one product.
+        result.match = { ...ref(nameMatches[0]), matchedBy: 'name' };
+        warnings.push(`Matched by product description "${nameMatches[0].name}" (SKU ${nameMatches[0].sku})`);
+      } else if (nameMatches.length > 1) {
+        errors.push(`Several products have this description (${nameMatches.map((p) => p.sku).join(', ')}): use their SKU`);
+      } else if (data.sku) {
+        // Not the same product, but close: told to the user, never merged automatically.
+        const compact = compactOf(data.sku);
+        const near = [...(catalog.bySkuCompact.get(compact) ?? []), ...(catalog.byNameCompact.get(compact) ?? [])];
+        if (near.length)
+          warnings.push(`Similar to existing ${near.map((p) => `${p.sku} (${p.name})`).join(', ')}: only spaces differ. A new product will be created; use the existing SKU to update it instead.`);
+        if (data.name) {
+          const sameName = catalog.byNameKey.get(keyOf(data.name)) ?? [];
+          if (sameName.length) warnings.push(`A product with the same name already exists (${sameName.map((p) => p.sku).join(', ')})`);
+        }
+      }
+      if (result.match) {
+        const prev = seenProduct.get(result.match.id);
+        if (prev) errors.push(`Same product as row ${prev}`);
+        else seenProduct.set(result.match.id, raw.rowNumber);
       }
     }
-    if (!result.match && !data.name && !errors.length) errors.push('Product name is required for new products');
+    if (!result.match && !errors.length) {
+      if (!data.sku) errors.push('SKU is required for new products');
+      else if (!data.name) {
+        // The five-column file has no name column: the product is named after its SKU / description.
+        if (!('name' in raw)) {
+          data.name = data.sku;
+          warnings.push('New product: its name is taken from the SKU column');
+        } else errors.push('Product name is required for new products');
+      }
+    }
     result.status = errors.length ? 'error' : result.match ? 'existing' : 'new';
     return result;
   });
@@ -265,7 +304,8 @@ export async function importRows(
           d.unit ?? 'pcs',
           d.minStock ?? 0,
           d.purchasePrice ?? 0,
-          d.sellingPrice ?? 0,
+          // Missing selling price: left empty, not invented.
+          d.sellingPrice ?? null,
           d.status ?? 'ACTIVE',
           actor.id,
         )) as number;
@@ -304,7 +344,8 @@ export async function importRows(
       const before = (await t.get<Record<string, unknown>>('SELECT * FROM products WHERE id = ?', id))!;
       // Empty cells never wipe existing data.
       const next = {
-        sku: d.sku,
+        // Matched by SKU (spaces / letter case may differ) or by description: the stored SKU stays.
+        sku: r.match!.matchedBy === 'barcode' && !r.match!.keepSku && d.sku ? d.sku : (before.sku as string),
         barcode: (d.barcode ?? before.barcode) as string | null,
         name: (d.name ?? before.name) as string,
         description: (d.description ?? before.description) as string | null,
@@ -313,7 +354,7 @@ export async function importRows(
         unit: (d.unit ?? before.unit) as string,
         min_stock: (d.minStock ?? before.min_stock) as number,
         purchase_price: (d.purchasePrice ?? before.purchase_price) as number,
-        selling_price: (d.sellingPrice ?? before.selling_price) as number,
+        selling_price: (d.sellingPrice ?? before.selling_price) as number | null,
         status: (d.status ?? before.status) as string,
       };
       await t.run(
@@ -330,7 +371,7 @@ export async function importRows(
         entityType: 'product',
         entityId: id,
         productId: id,
-        description: `${actor.username} updated product ${d.sku} via Excel import${changed.length ? ` (${changed.join(', ')})` : ''}.`,
+        description: `${actor.username} updated product ${next.sku} via Excel import${changed.length ? ` (${changed.join(', ')})` : ''}.`,
         oldValue: Object.fromEntries(changed.map((k) => [k, before[k]])),
         newValue: Object.fromEntries(changed.map((k) => [k, (next as Record<string, unknown>)[k]])),
       });

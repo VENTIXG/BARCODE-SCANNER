@@ -22,11 +22,15 @@ import { idempotencyKeySchema, runIdempotent } from '../lib/idempotency.js';
 
 export const productsRouter = Router();
 
+/**
+ * SKU or barcode: spaces inside are kept as typed (only the ends are trimmed); tabs and line
+ * breaks are refused. Codes that differ only in spacing or letter case count as the same code.
+ */
 const code = z
   .string()
   .trim()
   .max(64)
-  .refine((v) => !/\s/.test(v), 'must not contain spaces');
+  .refine((v) => !/[\u0000-\u001f\u007f]/.test(v), 'must not contain tabs or line breaks');
 
 const productBody = z.object({
   sku: code.min(1, 'SKU is required'),
@@ -38,7 +42,8 @@ const productBody = z.object({
   unit: z.string().trim().min(1).max(20).default('pcs'),
   minStock: z.number().min(0).default(0),
   purchasePrice: z.number().min(0).default(0),
-  sellingPrice: z.number().min(0).default(0),
+  /** Empty (null) = no selling price set. Left out on an update: the current one is kept. */
+  sellingPrice: z.number().min(0).nullish(),
   status: z.enum(['ACTIVE', 'INACTIVE']).default('ACTIVE'),
   locationCode: optText(40),
   /** Required to save a barcode that another product already uses. */
@@ -85,8 +90,12 @@ productsRouter.get('/check-unique', async (req, res) => {
   const excludeId = num(req.query.excludeId) ?? 0;
   const sku = str(req.query.sku);
   const barcode = str(req.query.barcode);
-  const skuMatch = sku ? ((await db.get('SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?', sku, excludeId)) ?? null) : null;
-  const barcodeMatches = barcode ? await db.all('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?', barcode, excludeId) : [];
+  const skuMatch = sku
+    ? ((await db.get('SELECT id, sku, name FROM products WHERE ims_key(sku::text) = ims_key(?) AND id <> ?', sku, excludeId)) ?? null)
+    : null;
+  const barcodeMatches = barcode
+    ? await db.all('SELECT id, sku, name FROM products WHERE ims_compact(barcode::text) = ims_compact(?) AND id <> ?', barcode, excludeId)
+    : [];
   res.json({ sku: skuMatch, barcode: barcodeMatches });
 });
 
@@ -108,7 +117,9 @@ productsRouter.get('/:id', async (req, res) => {
      FROM inventory_transactions WHERE product_id = ?`,
     id,
   );
-  const duplicates = p.barcode ? await db.all('SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?', p.barcode, id) : [];
+  const duplicates = p.barcode
+    ? await db.all('SELECT id, sku, name FROM products WHERE ims_compact(barcode::text) = ims_compact(?) AND id <> ?', p.barcode, id)
+    : [];
   res.json({ data: serializeProduct(p), stats, barcodeDuplicates: duplicates, variants });
 });
 
@@ -133,15 +144,16 @@ async function assertCodesAvailable(
   body: { sku: string; barcode: string | null; confirmDuplicateBarcode?: boolean },
   excludeId = 0,
 ) {
+  // "AB  12" and "ab 12" are the same SKU: no second product that differs only in spacing.
   const skuOwner = await db.get<{ id: number; sku: string; name: string }>(
-    'SELECT id, sku, name FROM products WHERE sku = ? AND id <> ?',
+    'SELECT id, sku, name FROM products WHERE ims_key(sku::text) = ims_key(?) AND id <> ?',
     body.sku,
     excludeId,
   );
-  if (skuOwner) throw conflict(`SKU ${body.sku} is already used by "${skuOwner.name}"`, 'DUPLICATE_SKU', skuOwner);
+  if (skuOwner) throw conflict(`SKU ${body.sku} is already used by "${skuOwner.name}" (${skuOwner.sku})`, 'DUPLICATE_SKU', skuOwner);
   if (body.barcode && !body.confirmDuplicateBarcode) {
     const others = await db.all<{ id: number; sku: string; name: string }>(
-      'SELECT id, sku, name FROM products WHERE barcode = ? AND id <> ?',
+      'SELECT id, sku, name FROM products WHERE ims_compact(barcode::text) = ims_compact(?) AND id <> ?',
       body.barcode,
       excludeId,
     );
@@ -181,7 +193,7 @@ productsRouter.post('/', requirePermission('products.manage'), async (req, res) 
       body.unit,
       body.minStock,
       body.purchasePrice,
-      body.sellingPrice,
+      body.sellingPrice ?? null,
       body.status,
       actor.id,
     )) as number;
@@ -258,7 +270,7 @@ productsRouter.put('/:id', requirePermission('products.manage'), async (req, res
       body.unit,
       body.minStock,
       body.purchasePrice,
-      body.sellingPrice,
+      body.sellingPrice === undefined ? before.selling_price : body.sellingPrice,
       body.status,
       nowIso(),
       id,

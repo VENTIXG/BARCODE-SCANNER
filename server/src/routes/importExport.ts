@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getDb, getDefaultWarehouseId } from '../db/index.js';
 import { actorOf, requirePermission } from '../middleware/auth.js';
 import { badRequest } from '../lib/errors.js';
-import { FMT, PRODUCT_COLUMNS, addSheet, newWorkbook, sendWorkbook, toDate, type Column } from '../lib/excel.js';
+import { FMT, PRODUCT_COLUMNS, STOCK_COLUMNS, addSheet, newWorkbook, sendWorkbook, toDate, type Column } from '../lib/excel.js';
 import { str } from '../lib/http.js';
 import { IMPORT_FIELDS, importRows, validateRows } from '../lib/importer.js';
 import { PRODUCT_SELECT, buildProductWhere, orderBy, type ProductRow } from '../lib/products.js';
@@ -33,32 +33,50 @@ function pickFields(rows: z.infer<typeof rowsSchema>) {
   });
 }
 
-importRouter.get('/template', async (_req, res) => {
+/** Import template: the five-column file (?layout=full: every product field). */
+importRouter.get('/template', async (req, res) => {
+  const full = req.query.layout === 'full';
   const wb = newWorkbook();
-  addSheet(wb, 'Products', PRODUCT_COLUMNS, [
-    { sku: 'ABC123', barcode: '5201234567890', name: 'Example product', description: 'Optional description', category: 'Beverages', supplier: 'Example Supplier S.A.', unit: 'pcs', quantity: 50, minStock: 10, location: 'A-01-03', purchasePrice: 1.2, sellingPrice: 2.5, status: 'Active' },
-    { sku: 'XYZ-500', barcode: '5209876543210', name: 'Second example (kg)', description: '', category: 'Food', supplier: 'Example Supplier S.A.', unit: 'kg', quantity: 12.5, minStock: 5, location: 'B-02-01', purchasePrice: 3.4, sellingPrice: 5.9, status: 'Active' },
-  ]);
+  if (full) {
+    addSheet(wb, 'Products', PRODUCT_COLUMNS, [
+      { sku: 'ABC123', barcode: '5201234567890', name: 'Example product', description: 'Optional description', category: 'Beverages', supplier: 'Example Supplier S.A.', unit: 'pcs', quantity: 50, minStock: 10, location: 'A-01-03', purchasePrice: 1.2, sellingPrice: 2.5, status: 'Active' },
+      { sku: 'XYZ-500', barcode: '5209876543210', name: 'Second example (kg)', description: '', category: 'Food', supplier: 'Example Supplier S.A.', unit: 'kg', quantity: 12.5, minStock: 5, location: 'B-02-01', purchasePrice: 3.4, sellingPrice: 5.9, status: 'Active' },
+    ]);
+  } else {
+    addSheet(wb, 'Products', STOCK_COLUMNS, [
+      { sku: 'ABC123', barcode: '5201234567890', quantity: 50, purchasePrice: 1.2, sellingPrice: 2.5 },
+      { sku: 'ΧΥΜΟΣ ΠΟΡΤΟΚΑΛΙ 1L', barcode: '0012345678905', quantity: 12, purchasePrice: 0.85, sellingPrice: null },
+    ]);
+  }
   const help = wb.addWorksheet('Instructions');
   help.columns = [{ width: 18 }, { width: 12 }, { width: 90 }];
   help.addRow(['Column', 'Required', 'Notes']).font = { bold: true };
-  const notes: [string, string, string][] = [
-    ['SKU', 'Yes', 'Unique product code. No spaces. Used to detect existing products.'],
-    ['Barcode', 'No', 'EAN / UPC / Code128. Keep the column formatted as Text so leading zeros are kept.'],
-    ['Product Name', 'New only', 'Required for new products.'],
-    ['Description', 'No', ''],
-    ['Category', 'No', 'Created automatically if it does not exist (option in the import screen).'],
-    ['Supplier', 'No', 'Created automatically if it does not exist (option in the import screen).'],
-    ['Unit', 'No', 'pcs, kg, lt, m, box ... Default: pcs.'],
-    ['Quantity', 'No', 'New products: initial stock (INITIAL_STOCK transaction). Existing products: see import options.'],
-    ['Minimum Stock', 'No', 'Low stock alert threshold.'],
-    ['Location', 'No', 'Format ZONE-RACK-SHELF, e.g. A-01-03. Created automatically.'],
-    ['Purchase Price', 'No', 'Decimal comma or dot are both accepted.'],
-    ['Selling Price', 'No', ''],
-    ['Status', 'No', 'Active / Inactive. Default: Active.'],
-  ];
+  const notes: [string, string, string][] = full
+    ? [
+        ['SKU', 'Yes', 'Product code; may contain spaces. Spacing and letter case do not create a second product.'],
+        ['Barcode', 'No', 'EAN / UPC / Code128. Keep the column formatted as Text so leading zeros are kept.'],
+        ['Product Name', 'New only', 'Required for new products.'],
+        ['Description', 'No', ''],
+        ['Category', 'No', 'Created automatically if it does not exist (option in the import screen).'],
+        ['Supplier', 'No', 'Created automatically if it does not exist (option in the import screen).'],
+        ['Unit', 'No', 'pcs, kg, lt, m, box ... Default: pcs.'],
+        ['Quantity', 'No', 'New products: initial stock (INITIAL_STOCK transaction). Existing products: see import options.'],
+        ['Minimum Stock', 'No', 'Low stock alert threshold.'],
+        ['Location', 'No', 'Format ZONE-RACK-SHELF, e.g. A-01-03. Created automatically.'],
+        ['Purchase Price', 'No', 'Decimal comma or dot are both accepted.'],
+        ['Selling Price', 'No', 'Empty = no selling price (nothing is invented).'],
+        ['Status', 'No', 'Active / Inactive. Default: Active.'],
+      ]
+    : [
+        ['A  SKU', 'Yes', 'Product code, or the product description. May contain spaces; it is kept exactly as written. Spacing and letter case do not create a second product.'],
+        ['B  Barcode Number', 'No', 'EAN / UPC / Code128. Keep the column formatted as Text so leading zeros are kept.'],
+        ['C  Quantity', 'No', 'New products: initial stock. Existing products: see the import options (do not change / set / add).'],
+        ['D  Purchase Price', 'No', 'Decimal comma or dot are both accepted (12,50 or 12.50).'],
+        ['E  Selling Price', 'No', 'Empty = no selling price (nothing is invented); an existing selling price is kept.'],
+        ['', '', 'New products get their name from column A. Files with the older, longer layout are accepted too.'],
+      ];
   notes.forEach((n) => help.addRow(n));
-  await sendWorkbook(res, wb, 'product_import_template');
+  await sendWorkbook(res, wb, full ? 'product_import_template_full' : 'product_import_template');
 });
 
 importRouter.post('/products/validate', async (req, res) => {
@@ -89,6 +107,14 @@ export const exportRouter = Router();
 function productRows(where: string, params: Record<string, string | number>, order = 'ORDER BY lower(p.name), p.id') {
   return getDb().all<ProductRow>(`${PRODUCT_SELECT} ${where} ${order}`, params);
 }
+
+const toStockSheetRow = (p: ProductRow) => ({
+  sku: p.sku,
+  barcode: p.barcode,
+  quantity: p.quantity,
+  purchasePrice: p.purchase_price,
+  sellingPrice: p.selling_price,
+});
 
 const toProductSheetRow = (p: ProductRow) => ({
   sku: p.sku,
@@ -142,8 +168,12 @@ const toInventoryRow = (p: ProductRow) => ({
   updatedAt: toDate(p.updated_at),
 });
 
-/** Products (import-compatible layout). Honours the same filters as the product list. */
-exportRouter.get('/products', async (req, res) => {
+/**
+ * Products in the five-column file (SKU | Barcode Number | Quantity | Purchase Price | Selling
+ * Price); /products-full: every field. Both honour the filters of the product list.
+ */
+exportRouter.get(['/products', '/products-full'], async (req, res) => {
+  const full = req.path.endsWith('-full');
   const wh = await getDefaultWarehouseId();
   const q = req.query as Record<string, unknown>;
   const { where, params } = buildProductWhere(
@@ -159,8 +189,10 @@ exportRouter.get('/products', async (req, res) => {
     wh,
   );
   const wb = newWorkbook();
-  addSheet(wb, 'Products', PRODUCT_COLUMNS, (await productRows(where, params, orderBy(str(q.sort), str(q.dir), Boolean(str(q.q))))).map(toProductSheetRow));
-  await sendWorkbook(res, wb, 'products');
+  const rows = await productRows(where, params, orderBy(str(q.sort), str(q.dir), Boolean(str(q.q))));
+  if (full) addSheet(wb, 'Products', PRODUCT_COLUMNS, rows.map(toProductSheetRow));
+  else addSheet(wb, 'Products', STOCK_COLUMNS, rows.map(toStockSheetRow));
+  await sendWorkbook(res, wb, full ? 'products_all_fields' : 'products');
 });
 
 exportRouter.get('/inventory', async (_req, res) => {

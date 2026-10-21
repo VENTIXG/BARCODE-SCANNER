@@ -32,7 +32,8 @@ export interface ProductRow {
   unit: string;
   min_stock: number;
   purchase_price: number;
-  selling_price: number;
+  /** Empty (null) when not set. */
+  selling_price: number | null;
   image_path: string | null;
   status: 'ACTIVE' | 'INACTIVE';
   created_at: string;
@@ -81,15 +82,19 @@ export async function getProduct(db: DB, id: number, warehouseId?: number): Prom
   return db.get<ProductRow>(`${PRODUCT_SELECT} WHERE p.id = @id`, { id, warehouseId: wh });
 }
 
-/** Exact lookup by barcode or SKU — used by the barcode scanner (index seek). */
+/**
+ * Exact lookup by barcode or SKU — used by the barcode scanner (index seek). SKUs may contain
+ * spaces: letter case and the number of spaces do not matter; barcodes match without spaces.
+ */
 export async function lookupByCode(db: DB, code: string, warehouseId?: number): Promise<ProductRow[]> {
   const c = code.trim();
   if (!c) return [];
   const wh = warehouseId ?? (await getDefaultWarehouseId(db));
   return db.all<ProductRow>(
     `${PRODUCT_SELECT}
-     WHERE p.id IN (SELECT id FROM products WHERE barcode = @code UNION SELECT id FROM products WHERE sku = @code)
-     ORDER BY (p.status = 'ACTIVE') DESC, COALESCE(p.barcode = @code, false) DESC, lower(p.name)`,
+     WHERE p.id IN (SELECT id FROM products WHERE ims_compact(barcode::text) = ims_compact(@code)
+                    UNION SELECT id FROM products WHERE ims_key(sku::text) = ims_key(@code))
+     ORDER BY (p.status = 'ACTIVE') DESC, COALESCE(ims_compact(p.barcode::text) = ims_compact(@code), false) DESC, lower(p.name)`,
     { code: c, warehouseId: wh },
   );
 }
@@ -112,7 +117,8 @@ export function buildProductWhere(f: ProductFilters, warehouseId: number) {
     const q = f.q.trim();
     params.q = q;
     params.like = `%${escapeLike(q)}%`;
-    const parts = ['p.sku = @q', 'p.barcode = @q'];
+    // An exact SKU, barcode or name (spaces and letter case ignored), or every word below.
+    const parts = ['ims_key(p.sku::text) = ims_key(@q)', 'ims_compact(p.barcode::text) = ims_compact(@q)', 'ims_key(p.name) = ims_key(@q)'];
     // Every word must appear in name, SKU, barcode or description (accents and case ignored).
     const words = searchWords(q);
     if (words.length) {
@@ -172,7 +178,9 @@ export function orderBy(sort: string | undefined, dir: string | undefined, hasQu
   const col = sort && SORTS[sort];
   if (col) return `ORDER BY ${col} ${direction}, p.id`;
   // Relevance: exact SKU/barcode matches first.
-  if (hasQuery) return `ORDER BY COALESCE(p.sku = @q OR p.barcode = @q, false) DESC, lower(p.name), p.id`;
+  if (hasQuery)
+    return `ORDER BY COALESCE(ims_key(p.sku::text) = ims_key(@q) OR ims_compact(p.barcode::text) = ims_compact(@q), false) DESC,
+      COALESCE(ims_key(p.name) = ims_key(@q), false) DESC, lower(p.name), p.id`;
   return 'ORDER BY lower(p.name), p.id';
 }
 

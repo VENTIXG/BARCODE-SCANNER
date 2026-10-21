@@ -5,9 +5,9 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import { getDb, getDefaultWarehouseId, nowIso } from '../db/index.js';
+import { getDb, getDefaultWarehouseId, nowIso, type DB } from '../db/index.js';
 import { actorOf, requirePermission } from '../middleware/auth.js';
-import { audit } from '../lib/audit.js';
+import { audit, type Actor } from '../lib/audit.js';
 import { badRequest, notFound } from '../lib/errors.js';
 import { escapeLike, idParam, num, optText, pagination, str } from '../lib/http.js';
 import { nextDocumentNumber, peekDocumentNumber } from '../lib/numbering.js';
@@ -31,7 +31,13 @@ const itemSchema = z.object({
   notes: optText(500),
 });
 
-const receiptBody = z.object({
+/** A receipt line from a supplier invoice also keeps the invoice's own text for it. */
+export interface ReceiptItemInput extends z.infer<typeof itemSchema> {
+  invoiceDescription?: string | null;
+  supplierCode?: string | null;
+}
+
+export const receiptBody = z.object({
   idempotencyKey: idempotencyKeySchema,
   supplierId: z.number().int().positive().nullish(),
   invoiceNumber: optText(100),
@@ -53,6 +59,8 @@ const dispatchBody = z.object({
 });
 
 type Kind = 'receipt' | 'dispatch';
+type ReceiptBody = Omit<z.infer<typeof receiptBody>, 'items'> & { items: ReceiptItemInput[] };
+type DispatchBody = z.infer<typeof dispatchBody>;
 
 const META = {
   receipt: {
@@ -81,7 +89,7 @@ const META = {
   },
 };
 
-async function loadDocument(kind: Kind, id: number) {
+export async function loadDocument(kind: Kind, id: number) {
   const db = getDb();
   const m = META[kind];
   const doc = await db.get(
@@ -96,12 +104,126 @@ async function loadDocument(kind: Kind, id: number) {
   if (!doc) return undefined;
   const items = await db.all(
     `SELECT it.id, it.product_id, it.quantity, it.${m.priceCol} AS unit_price, it.notes,
+            ${kind === 'receipt' ? 'it.invoice_description, it.supplier_code,' : ''}
             p.sku, p.barcode, p.name, p.unit
      FROM ${m.itemsTable} it JOIN products p ON p.id = it.product_id
      WHERE it.${m.fk} = ? ORDER BY it.id`,
     id,
   );
   return { ...doc, items };
+}
+
+/**
+ * Post a receipt or dispatch: check products and stock, number it, write its lines and one
+ * ledger transaction per line. Must run inside a transaction (the router's runIdempotent, or
+ * the invoice import); returns the document id.
+ */
+export async function postDocument(db: DB, actor: Actor, kind: Kind, body: ReceiptBody | DispatchBody): Promise<number> {
+  const m = META[kind];
+  const warehouseId = await getDefaultWarehouseId(db);
+  // Validate products (and stock for dispatches) before writing anything.
+  const totals = new Map<number, number>();
+  for (const it of body.items) totals.set(it.productId, round3((totals.get(it.productId) ?? 0) + it.quantity));
+  const products = new Map<number, Awaited<ReturnType<typeof getProductRef>>>();
+  for (const pid of totals.keys()) products.set(pid, await getProductRef(db, pid));
+
+  if (kind === 'receipt') {
+    const inactive = [...products.values()].filter((p) => p.status === 'INACTIVE');
+    if (inactive.length)
+      throw badRequest(`Inactive products cannot be received: ${inactive.map((p) => p.sku).join(', ')}`);
+  } else {
+    const short = [];
+    for (const [pid, requested] of totals) {
+      const available = await getQuantity(db, pid, warehouseId);
+      if (requested > available)
+        short.push({ productId: pid, sku: products.get(pid)!.sku, name: products.get(pid)!.name, available, requested });
+    }
+    const force = (body as z.infer<typeof dispatchBody>).force && (await negativeStockAllowed(db));
+    if (short.length && !force) throw new InsufficientStockError(short);
+  }
+
+  const number = await nextDocumentNumber(db, m.prefix, new Date(`${body.date}T12:00:00`));
+  const totalQty = round3(body.items.reduce((s, it) => s + it.quantity, 0));
+  const totalValue = round3(body.items.reduce((s, it) => s + it.quantity * (it.unitPrice ?? 0), 0));
+  let docId: number;
+  let reference: string;
+  if (kind === 'receipt') {
+    const b = body as z.infer<typeof receiptBody>;
+    if (b.supplierId && !(await db.get('SELECT 1 FROM suppliers WHERE id = ?', b.supplierId)))
+      throw badRequest('Supplier not found');
+    docId = (
+      await db.run(
+        `INSERT INTO stock_receipts (receipt_number, warehouse_id, supplier_id, invoice_number, receipt_date,
+           status, notes, total_quantity, total_value, created_by, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?) RETURNING id`,
+        number, warehouseId, b.supplierId ?? null, b.invoiceNumber, b.date, b.notes, totalQty, totalValue,
+        actor.id, nowIso(),
+      )
+    ).rows[0].id;
+    reference = b.invoiceNumber ? `${number} / ${b.invoiceNumber}` : number;
+  } else {
+    const b = body as z.infer<typeof dispatchBody>;
+    docId = (
+      await db.run(
+        `INSERT INTO stock_dispatches (dispatch_number, warehouse_id, customer_name, reference, dispatch_date,
+           status, notes, total_quantity, total_value, created_by, confirmed_at)
+         VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?) RETURNING id`,
+        number, warehouseId, b.customerName, b.reference, b.date, b.notes, totalQty, totalValue, actor.id,
+        nowIso(),
+      )
+    ).rows[0].id;
+    reference = b.reference ? `${number} / ${b.reference}` : number;
+  }
+
+  for (const it of body.items) {
+    if (kind === 'receipt') {
+      const r = it as ReceiptItemInput;
+      await db.run(
+        `INSERT INTO stock_receipt_items (receipt_id, product_id, quantity, unit_cost, notes, invoice_description, supplier_code)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        docId, r.productId, r.quantity, r.unitPrice ?? null, r.notes, r.invoiceDescription ?? null, r.supplierCode ?? null,
+      );
+    } else {
+      await db.run(
+        'INSERT INTO stock_dispatch_items (dispatch_id, product_id, quantity, unit_price, notes) VALUES (?, ?, ?, ?, ?)',
+        docId, it.productId, it.quantity, it.unitPrice ?? null, it.notes,
+      );
+    }
+    await applyStockChange(db, actor, {
+      productId: it.productId,
+      warehouseId,
+      type: kind === 'receipt' ? 'STOCK_IN' : 'STOCK_OUT',
+      quantity: it.quantity,
+      unitCost: kind === 'receipt' ? (it.unitPrice ?? null) : null,
+      reference,
+      notes: it.notes,
+      sourceType: m.source,
+      sourceId: docId,
+      allowNegative: kind === 'dispatch' && (body as z.infer<typeof dispatchBody>).force,
+    });
+    if (kind === 'receipt' && (body as z.infer<typeof receiptBody>).updatePurchasePrices && it.unitPrice != null) {
+      await db.run(
+        'UPDATE products SET purchase_price = ?, updated_at = ? WHERE id = ? AND purchase_price IS DISTINCT FROM ?',
+        it.unitPrice, nowIso(), it.productId, it.unitPrice,
+      );
+    }
+  }
+
+  const party =
+    kind === 'receipt'
+      ? await db.value<string>('SELECT name FROM suppliers WHERE id = ?', (body as z.infer<typeof receiptBody>).supplierId ?? 0)
+      : (body as z.infer<typeof dispatchBody>).customerName;
+  await audit(db, actor, {
+    action: kind === 'receipt' ? 'RECEIPT.CONFIRM' : 'DISPATCH.CONFIRM',
+    entityType: m.table,
+    entityId: docId,
+    description:
+      kind === 'receipt'
+        ? `${actor.username} confirmed receipt ${number}${party ? ` from ${party}` : ''}: ${body.items.length} lines, ${totalQty} units.`
+        : `${actor.username} confirmed dispatch ${number}${party ? ` to ${party}` : ''}: ${body.items.length} lines, ${totalQty} units.`,
+    newValue: { number, items: body.items.length, totalQuantity: totalQty },
+  });
+  return docId;
 }
 
 export function makeDocumentRouter(kind: Kind) {
@@ -169,100 +291,7 @@ export function makeDocumentRouter(kind: Kind) {
 
     // runIdempotent runs the work in one transaction: the document is posted completely or not at all.
     const out = await runIdempotent(db, actor, body.idempotencyKey, kind, async () => {
-      const warehouseId = await getDefaultWarehouseId(db);
-      // Validate products (and stock for dispatches) before writing anything.
-      const totals = new Map<number, number>();
-      for (const it of body.items) totals.set(it.productId, round3((totals.get(it.productId) ?? 0) + it.quantity));
-      const products = new Map<number, Awaited<ReturnType<typeof getProductRef>>>();
-      for (const pid of totals.keys()) products.set(pid, await getProductRef(db, pid));
-
-      if (kind === 'receipt') {
-        const inactive = [...products.values()].filter((p) => p.status === 'INACTIVE');
-        if (inactive.length)
-          throw badRequest(`Inactive products cannot be received: ${inactive.map((p) => p.sku).join(', ')}`);
-      } else {
-        const short = [];
-        for (const [pid, requested] of totals) {
-          const available = await getQuantity(db, pid, warehouseId);
-          if (requested > available)
-            short.push({ productId: pid, sku: products.get(pid)!.sku, name: products.get(pid)!.name, available, requested });
-        }
-        const force = (body as z.infer<typeof dispatchBody>).force && (await negativeStockAllowed(db));
-        if (short.length && !force) throw new InsufficientStockError(short);
-      }
-
-      const number = await nextDocumentNumber(db, m.prefix, new Date(`${body.date}T12:00:00`));
-      const totalQty = round3(body.items.reduce((s, it) => s + it.quantity, 0));
-      const totalValue = round3(body.items.reduce((s, it) => s + it.quantity * (it.unitPrice ?? 0), 0));
-      let docId: number;
-      let reference: string;
-      if (kind === 'receipt') {
-        const b = body as z.infer<typeof receiptBody>;
-        if (b.supplierId && !(await db.get('SELECT 1 FROM suppliers WHERE id = ?', b.supplierId)))
-          throw badRequest('Supplier not found');
-        docId = (
-          await db.run(
-            `INSERT INTO stock_receipts (receipt_number, warehouse_id, supplier_id, invoice_number, receipt_date,
-               status, notes, total_quantity, total_value, created_by, confirmed_at)
-             VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?) RETURNING id`,
-            number, warehouseId, b.supplierId ?? null, b.invoiceNumber, b.date, b.notes, totalQty, totalValue,
-            actor.id, nowIso(),
-          )
-        ).rows[0].id;
-        reference = b.invoiceNumber ? `${number} / ${b.invoiceNumber}` : number;
-      } else {
-        const b = body as z.infer<typeof dispatchBody>;
-        docId = (
-          await db.run(
-            `INSERT INTO stock_dispatches (dispatch_number, warehouse_id, customer_name, reference, dispatch_date,
-               status, notes, total_quantity, total_value, created_by, confirmed_at)
-             VALUES (?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?) RETURNING id`,
-            number, warehouseId, b.customerName, b.reference, b.date, b.notes, totalQty, totalValue, actor.id,
-            nowIso(),
-          )
-        ).rows[0].id;
-        reference = b.reference ? `${number} / ${b.reference}` : number;
-      }
-
-      for (const it of body.items) {
-        await db.run(
-          `INSERT INTO ${m.itemsTable} (${m.fk}, product_id, quantity, ${m.priceCol}, notes) VALUES (?, ?, ?, ?, ?)`,
-          docId, it.productId, it.quantity, it.unitPrice ?? null, it.notes,
-        );
-        await applyStockChange(db, actor, {
-          productId: it.productId,
-          warehouseId,
-          type: kind === 'receipt' ? 'STOCK_IN' : 'STOCK_OUT',
-          quantity: it.quantity,
-          unitCost: kind === 'receipt' ? (it.unitPrice ?? null) : null,
-          reference,
-          notes: it.notes,
-          sourceType: m.source,
-          sourceId: docId,
-          allowNegative: kind === 'dispatch' && (body as z.infer<typeof dispatchBody>).force,
-        });
-        if (kind === 'receipt' && (body as z.infer<typeof receiptBody>).updatePurchasePrices && it.unitPrice != null) {
-          await db.run(
-            'UPDATE products SET purchase_price = ?, updated_at = ? WHERE id = ? AND purchase_price IS DISTINCT FROM ?',
-            it.unitPrice, nowIso(), it.productId, it.unitPrice,
-          );
-        }
-      }
-
-      const party =
-        kind === 'receipt'
-          ? await db.value<string>('SELECT name FROM suppliers WHERE id = ?', (body as z.infer<typeof receiptBody>).supplierId ?? 0)
-          : (body as z.infer<typeof dispatchBody>).customerName;
-      await audit(db, actor, {
-        action: kind === 'receipt' ? 'RECEIPT.CONFIRM' : 'DISPATCH.CONFIRM',
-        entityType: m.table,
-        entityId: docId,
-        description:
-          kind === 'receipt'
-            ? `${actor.username} confirmed receipt ${number}${party ? ` from ${party}` : ''}: ${body.items.length} lines, ${totalQty} units.`
-            : `${actor.username} confirmed dispatch ${number}${party ? ` to ${party}` : ''}: ${body.items.length} lines, ${totalQty} units.`,
-        newValue: { number, items: body.items.length, totalQuantity: totalQty },
-      });
+      const docId = await postDocument(db, actor, kind, body);
       return { status: 201, body: { data: await loadDocument(kind, docId) } };
     });
     res.status(out.status).json(out.body);

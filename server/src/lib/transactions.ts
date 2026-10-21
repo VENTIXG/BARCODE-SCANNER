@@ -55,7 +55,7 @@ export function buildTxWhere(f: TxFilters) {
     params.q = f.q;
     params.like = `%${escapeLike(f.q)}%`;
     where.push(
-      `(p.sku = @q OR p.barcode = @q OR p.name ILIKE @like ESCAPE '\\' OR p.sku ILIKE @like ESCAPE '\\' OR t.reference ILIKE @like ESCAPE '\\' OR t.notes ILIKE @like ESCAPE '\\')`,
+      `(ims_key(p.sku::text) = ims_key(@q) OR ims_compact(p.barcode::text) = ims_compact(@q) OR p.name ILIKE @like ESCAPE '\\' OR p.sku ILIKE @like ESCAPE '\\' OR t.reference ILIKE @like ESCAPE '\\' OR t.notes ILIKE @like ESCAPE '\\')`,
     );
   }
   return { where: where.length ? `WHERE ${where.join(' AND ')}` : '', params };

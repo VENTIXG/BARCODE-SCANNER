@@ -60,9 +60,19 @@ export async function sendWorkbook(res: Response, wb: ExcelJS.Workbook, baseName
 export const toDate = (iso: unknown) => (typeof iso === 'string' && iso ? new Date(iso) : null);
 
 /**
- * Column layout shared by the import template and the product export, so an
- * exported file can be edited and re-imported directly.
+ * The standard product file, in this order: SKU | Barcode Number | Quantity | Purchase Price |
+ * Selling Price. The import template and the product export use it, so an exported file can
+ * be edited and imported again. SKU and barcode are text cells (leading zeros and spaces kept).
  */
+export const STOCK_COLUMNS: Column[] = [
+  { header: 'SKU', key: 'sku', width: 28, numFmt: '@' },
+  { header: 'Barcode Number', key: 'barcode', width: 18, numFmt: '@' },
+  { header: 'Quantity', key: 'quantity', width: 11, numFmt: QTY },
+  { header: 'Purchase Price', key: 'purchasePrice', width: 15, numFmt: MONEY },
+  { header: 'Selling Price', key: 'sellingPrice', width: 14, numFmt: MONEY },
+];
+
+/** Every product field (the layout before the five-column file; still accepted by the import). */
 export const PRODUCT_COLUMNS: Column[] = [
   { header: 'SKU', key: 'sku', width: 16, numFmt: '@' },
   { header: 'Barcode', key: 'barcode', width: 18, numFmt: '@' },

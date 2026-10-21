@@ -14,6 +14,7 @@ import { authRouter } from './routes/auth.js';
 import { categoriesRouter, locationsRouter, settingsRouter, suppliersRouter, warehousesRouter } from './routes/catalog.js';
 import { dashboardRouter } from './routes/dashboard.js';
 import { makeDocumentRouter } from './routes/documents.js';
+import { invoicesRouter } from './routes/invoices.js';
 import { exportRouter, importRouter } from './routes/importExport.js';
 import { productsRouter } from './routes/products.js';
 import { reportsRouter } from './routes/reports.js';
@@ -96,6 +97,7 @@ export function createApp() {
   api.use('/stock', stockRouter);
   api.use('/receipts', requirePermission('stock.in'), makeDocumentRouter('receipt'));
   api.use('/dispatches', requirePermission('stock.out'), makeDocumentRouter('dispatch'));
+  api.use('/invoices', requirePermission('stock.in'), invoicesRouter);
   api.use('/transactions', transactionsRouter);
   api.use('/categories', requirePermission('catalog.view'), categoriesRouter);
   api.use('/suppliers', requirePermission('catalog.view'), suppliersRouter);
