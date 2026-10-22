@@ -11,7 +11,7 @@ import { AlertTriangle, ArrowDownToLine, ArrowUpFromLine, CheckCircle2, Download
 import { toast } from 'sonner';
 import { ApiError, api, download, newIdempotencyKey, type Page } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { fmtDate, fmtMoney, fmtQty, todayLocal } from '../lib/format';
+import { fmtDate, fmtMoney, fmtQty, parseDecimal, todayLocal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { beep } from '../lib/scanner';
 import { errMsg, useSuppliers } from '../lib/queries';
@@ -76,7 +76,7 @@ const emptyDraft = (): Draft => ({
   lines: [],
 });
 
-const parseQty = (s: string) => Number(String(s).replace(',', '.'));
+const parseQty = (s: string) => (String(s).trim() === '' ? 0 : parseDecimal(s));
 
 export default function StockDocumentPage({ kind }: { kind: Kind }) {
   const t = useT();

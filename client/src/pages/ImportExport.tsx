@@ -6,128 +6,13 @@ import clsx from 'clsx';
 import { AlertTriangle, ArrowRight, CheckCircle2, Download, FileSpreadsheet, FileUp, RotateCcw, Upload, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, download } from '../lib/api';
-import { fmtDateTime, fmtMoney, fmtNumber, fmtQty, localDateToIso, todayLocal } from '../lib/format';
+import { fmtDateTime, fmtMoney, fmtNumber, fmtQty, localDateToIso, parseDecimal, todayLocal } from '../lib/format';
 import { useT } from '../lib/i18n';
+import { FIELDS, mappingFor, parseSheet, type FieldKey, type ParsedSheet } from '../lib/importSheet';
 import { sha256Hex } from '../lib/invoiceFile';
 import { errMsg } from '../lib/queries';
 import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorBox, Input, PageHeader, Segmented, Select, Table, Tabs, Td, Th } from '../components/ui';
 
-// ---- Column mapping -------------------------------------------------------------
-
-const FIELDS = [
-  { key: 'sku', label: 'SKU', required: true },
-  { key: 'barcode', label: 'Barcode' },
-  { key: 'name', label: 'Product Name', required: true },
-  { key: 'description', label: 'Description' },
-  { key: 'category', label: 'Category' },
-  { key: 'supplier', label: 'Supplier' },
-  { key: 'unit', label: 'Unit' },
-  { key: 'quantity', label: 'Quantity' },
-  { key: 'minStock', label: 'Minimum Stock' },
-  { key: 'location', label: 'Location' },
-  { key: 'purchasePrice', label: 'Purchase Price' },
-  { key: 'sellingPrice', label: 'Selling Price' },
-  { key: 'status', label: 'Status' },
-] as const;
-type FieldKey = (typeof FIELDS)[number]['key'];
-
-/** Header synonyms (English + Greek) used for automatic column detection. */
-const SYNONYMS: Record<FieldKey, string[]> = {
-  sku: ['sku', 'code', 'item code', 'product code', 'article', 'κωδικος', 'κωδικος ειδους', 'κωδ', 'κωδικος προιοντος'],
-  barcode: ['barcode', 'barcode number', 'bar code', 'ean', 'ean13', 'upc', 'gtin', 'ean upc', 'barcode ean', 'γραμμωτος κωδικας', 'αριθμος barcode'],
-  name: ['product name', 'name', 'item name', 'product', 'item', 'title', 'ονομα', 'ονομασια', 'ονομα προιοντος', 'ειδος', 'περιγραφη ειδους'],
-  description: ['description', 'details', 'περιγραφη', 'σχολια'],
-  category: ['category', 'group', 'product group', 'κατηγορια', 'ομαδα'],
-  supplier: ['supplier', 'vendor', 'manufacturer', 'προμηθευτης'],
-  unit: ['unit', 'uom', 'unit of measure', 'μοναδα', 'μμ', 'μοναδα μετρησης'],
-  quantity: ['quantity', 'qty', 'stock', 'on hand', 'current stock', 'pieces', 'pcs', 'units', 'ποσοτητα', 'αποθεμα', 'ποσ', 'τεμαχια', 'τεμ', 'τμχ', 'temaxia', 'posotita', 'posothta'],
-  minStock: ['minimum stock', 'min stock', 'min', 'minimum', 'reorder level', 'reorder point', 'ελαχιστο', 'ελαχιστο αποθεμα'],
-  location: ['location', 'bin', 'shelf', 'position', 'θεση', 'ραφι', 'θεση αποθηκης'],
-  purchasePrice: ['purchase price', 'cost', 'cost price', 'buy price', 'buying price', 'unit cost', 'τιμη αγορας', 'κοστος', 'τιμη κοστους', 'κοστος αγορας', 'timh agoras', 'timi agoras', 'kostos'],
-  sellingPrice: ['selling price', 'price', 'sale price', 'retail price', 'sell price', 'τιμη πωλησης', 'τιμη λιανικης', 'λιανικη', 'τιμη', 'timh polhshs', 'timi polisis', 'timh lianikhs'],
-  status: ['status', 'active', 'state', 'κατασταση'],
-};
-
-/** Line totals, amounts, discounts and percentages: never a quantity or a unit price. */
-const NOT_A_UNIT_VALUE = /(^| )(total|totals|sum|amount|value|συνολο|συνολικη|συνολικο|συνολικης|αξια|ποσο|εκπτωση|εκπτ|discount|ποσοστο|percent)( |$)/;
-const VALUE_FIELDS = new Set<FieldKey>(['quantity', 'minStock', 'purchasePrice', 'sellingPrice']);
-
-const norm = (s: string) =>
-  s
-    .normalize('NFD')
-    .replace(/\p{M}+/gu, '')
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .trim();
-
-function autoMap(headers: string[]): (FieldKey | '')[] {
-  const result: (FieldKey | '')[] = headers.map(() => '');
-  const used = new Set<FieldKey>();
-  // Pass 1: the title is a known name; pass 2: it contains one as whole words; pass 3: anywhere.
-  // In passes 2 and 3 the longest name wins: "Unit Price" is a price, not the unit, and
-  // "Minimum Stock Level" the minimum stock, not the quantity.
-  const fits = (n: string, s: string, pass: number) =>
-    pass === 0 ? n === s : pass === 1 ? ` ${n} `.includes(` ${s} `) : s.length > 2 && n.includes(s);
-  for (const pass of [0, 1, 2]) {
-    headers.forEach((h, i) => {
-      if (result[i]) return;
-      const n = norm(h);
-      if (!n) return;
-      let best: { key: FieldKey; length: number } | null = null;
-      for (const f of FIELDS) {
-        if (used.has(f.key) || (VALUE_FIELDS.has(f.key) && NOT_A_UNIT_VALUE.test(n))) continue;
-        for (const s of SYNONYMS[f.key]) if (fits(n, s, pass) && (!best || s.length > best.length)) best = { key: f.key, length: s.length };
-      }
-      if (best) {
-        result[i] = best.key;
-        used.add(best.key);
-      }
-    });
-  }
-  return result;
-}
-
-interface Parsed {
-  fileName: string;
-  sheets: string[];
-  sheet: string;
-  headerRow: number; // 0-based index in the sheet; -1: no header row
-  headers: string[];
-  rows: unknown[][];
-  noHeader?: boolean;
-}
-
-/** The standard file: A SKU | B Barcode Number | C Quantity | D Purchase Price | E Selling Price. */
-const STANDARD: FieldKey[] = ['sku', 'barcode', 'quantity', 'purchasePrice', 'sellingPrice'];
-const COLUMN_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-
-function parseSheet(wb: XLSX.WorkBook, fileName: string, sheet: string): Parsed {
-  const data = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[sheet], { header: 1, raw: true, defval: null, blankrows: false });
-  // The header is the first row with at least two non-empty cells.
-  let headerRow = data.findIndex((r) => r.filter((c) => c !== null && String(c).trim() !== '').length >= 2);
-  if (headerRow < 0) headerRow = 0;
-  const width = Math.max(0, ...data.map((r) => r.length));
-  const cells = (data[headerRow] ?? []).map((h) => (h == null ? '' : String(h).trim()));
-  // No header row at all (the file starts with data): the five standard columns by position.
-  const isNumber = (v: unknown) => typeof v === 'number' || (typeof v === 'string' && /^\s*-?[\d.,]+\s*$/.test(v) && /\d/.test(v));
-  const noHeader =
-    width <= STANDARD.length &&
-    autoMap(cells).every((m) => !m) &&
-    [2, 3, 4].some((i) => isNumber(data[headerRow]?.[i]));
-  if (noHeader) headerRow = -1;
-  const headers = Array.from({ length: width }, (_, i) => {
-    if (noHeader) return `${t_column(i)}`;
-    const h = data[headerRow]?.[i];
-    return h == null || String(h).trim() === '' ? t_column(i) : String(h).trim();
-  });
-  const rows = data.slice(headerRow + 1).filter((r) => r.some((c) => c !== null && String(c).trim() !== ''));
-  return { fileName, sheets: wb.SheetNames, sheet, headerRow, headers, rows, noHeader };
-}
-
-const t_column = (i: number) => `Column ${COLUMN_LETTERS[i] ?? i + 1}`;
-
-/** Detected columns; a file without headers gets the standard order A-E. */
-const mappingFor = (p: Parsed): (FieldKey | '')[] => (p.noHeader ? p.headers.map((_, i) => STANDARD[i] ?? '') : autoMap(p.headers));
 
 interface RowResult {
   rowNumber: number;
@@ -216,7 +101,7 @@ function ImportWizard() {
   const fileInput = useRef<HTMLInputElement>(null);
   const workbook = useRef<XLSX.WorkBook | null>(null);
   const [step, setStep] = useState(0);
-  const [parsed, setParsed] = useState<Parsed | null>(null);
+  const [parsed, setParsed] = useState<ParsedSheet | null>(null);
   const [mapping, setMapping] = useState<(FieldKey | '')[]>([]);
   const [parseError, setParseError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -279,7 +164,7 @@ function ImportWizard() {
   const apiRows = useMemo(() => {
     if (!parsed) return [];
     return parsed.rows.map((r, i) => {
-      const out: Record<string, unknown> = { rowNumber: parsed.headerRow + i + 2 };
+      const out: Record<string, unknown> = { rowNumber: parsed.rowNumbers[i] };
       mapping.forEach((field, col) => {
         if (!field) return;
         const v = r[col];
@@ -649,7 +534,7 @@ function PreviewTable({
   const stockNote = (r: RowResult, q: unknown) => {
     const cur = r.match?.current;
     if (!cur || !updates(r)) return null;
-    const n = Number(String(q ?? '').replace(',', '.'));
+    const n = parseDecimal(String(q ?? ''));
     if (empty(q) || quantityMode === 'ignore' || !quantityMode || Number.isNaN(n)) return t('stock {n}', { n: fmtQty(cur.quantity) });
     return `${fmtQty(cur.quantity)} → ${fmtQty(quantityMode === 'add' ? cur.quantity + n : n)}`;
   };

@@ -118,6 +118,8 @@ describe('Windows app', () => {
       await win.fill('input[type=password]', 'admin123');
       await win.click('button[type=submit]');
       await win.waitForURL(/\/$/);
+      // The built-in first password opens only the screen to choose one's own.
+      await win.getByText('Ορίστε δικό σας κωδικό').waitFor();
     } finally {
       await quit(app);
     }

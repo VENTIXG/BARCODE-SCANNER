@@ -57,7 +57,7 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
   if (!token) return next(new HttpError(401, 'Authentication required', 'UNAUTHENTICATED'));
   let payload: TokenPayload;
   try {
-    payload = jwt.verify(token, config.jwtSecret) as unknown as TokenPayload;
+    payload = jwt.verify(token, config.jwtSecret, { algorithms: ['HS256'] }) as unknown as TokenPayload;
   } catch {
     return next(new HttpError(401, 'Session expired, please sign in again', 'UNAUTHENTICATED'));
   }
@@ -73,6 +73,16 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
   if (!user || !user.is_active || user.token_version !== payload.tv)
     return next(new HttpError(401, 'Session is no longer valid', 'UNAUTHENTICATED'));
   req.user = user;
+  next();
+}
+
+/**
+ * A temporary password (the built-in first password, or one an administrator set) only opens
+ * the password change: /api/auth (me, change-password, logout) is mounted before this.
+ */
+export function requirePasswordChanged(req: Request, _res: Response, next: NextFunction) {
+  if (req.user?.must_change_password)
+    return next(new HttpError(403, 'Change your temporary password to continue', 'PASSWORD_CHANGE_REQUIRED'));
   next();
 }
 

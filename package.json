@@ -16,7 +16,7 @@
     "typecheck": "npm run typecheck -w server && npm run typecheck -w client",
     "desktop": "npm ci --prefix desktop && npm run start --prefix desktop",
     "desktop:win": "npm ci --prefix desktop && npm run dist:win --prefix desktop",
-    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs e2e/forms.e2e.mjs e2e/invoice.e2e.mjs e2e/import.e2e.mjs",
+    "e2e": "node --test --test-timeout=180000 e2e/multi-pc.e2e.mjs e2e/forms.e2e.mjs e2e/invoice.e2e.mjs e2e/import.e2e.mjs e2e/screens.e2e.mjs e2e/workflow.e2e.mjs",
     "e2e:desktop": "xvfb-run -a node --test --test-timeout=300000 e2e/desktop.e2e.mjs",
     "test:server-lifecycle": "sudo -E env \"PATH=$PATH\" deploy/test/lifecycle.sh",
     "version:patch": "npm version patch --no-git-tag-version --workspaces --include-workspace-root",
@@ -27,6 +27,8 @@
     "playwright": "^1.63.0"
   },
   "overrides": {
-    "uuid": "^11.1.1"
+    "uuid": "^11.1.1",
+    "shell-quote": "1.11.0",
+    "source-map-js": "1.2.2"
   }
 }

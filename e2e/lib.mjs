@@ -23,7 +23,7 @@ export function testServer(port) {
     start() {
       child = spawn(process.execPath, ['server/dist/index.js'], {
         cwd: ROOT,
-        env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: data, NODE_ENV: 'production' },
+        env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: data, NODE_ENV: 'production', ADMIN_PASSWORD: process.env.ADMIN_PASSWORD ?? 'admin123' },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stderr.on('data', (d) => process.env.E2E_VERBOSE && process.stderr.write(d));
@@ -33,6 +33,12 @@ export function testServer(port) {
       child?.kill('SIGTERM');
       child = null;
     },
+    /** SIGKILL: a crash or power cut, the server gets no chance to close anything. */
+    kill(signal = 'SIGKILL') {
+      child?.kill(signal);
+      child = null;
+    },
+    pid: () => child?.pid,
     cleanup() {
       child?.kill('SIGTERM');
       fs.rmSync(data, { recursive: true, force: true });
@@ -77,6 +83,25 @@ export async function until(fn, label, timeoutMs = 8000) {
     await new Promise((r) => setTimeout(r, 150));
   }
   throw new Error(`timed out waiting for: ${label} (last value: ${JSON.stringify(last)})`);
+}
+
+/**
+ * A user created by an administrator gets a temporary password and must choose their own at the
+ * first sign-in: done here, so the user signs in with `user.password` afterwards.
+ */
+export async function createUser(base, adminCookie, user) {
+  const temporary = `${user.password}-temp`;
+  const json = { 'Content-Type': 'application/json' };
+  const r = await fetch(`${base}/api/users`, { method: 'POST', headers: { ...json, Cookie: adminCookie }, body: JSON.stringify({ ...user, password: temporary }) });
+  assert.equal(r.status, 201, `create user ${user.username}`);
+  const cookie = await apiLogin(base, user.username, temporary);
+  const c = await fetch(`${base}/api/auth/change-password`, {
+    method: 'POST',
+    headers: { ...json, Cookie: cookie },
+    body: JSON.stringify({ currentPassword: temporary, newPassword: user.password }),
+  });
+  assert.equal(c.status, 200, `first password of ${user.username}`);
+  return (await r.json()).data;
 }
 
 export async function uiLogin(page, base, username, password) {

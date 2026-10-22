@@ -2,11 +2,21 @@ import { z } from 'zod';
 import { normalizeText } from '../db/index.js';
 import { badRequest } from './errors.js';
 
+/** Largest id the database stores (INTEGER). */
+export const MAX_ID = 2_147_483_647;
+
 /** Parse a numeric route param (e.g. /products/:id). */
 export function idParam(value: unknown): number {
   const n = Number(value);
-  if (!Number.isInteger(n) || n <= 0) throw badRequest('Invalid id');
+  if (!Number.isInteger(n) || n <= 0 || n > MAX_ID) throw badRequest('Invalid id');
   return n;
+}
+
+/** True when a request value (query or JSON body, at any depth) holds a NUL character. */
+export function hasNul(v: unknown, depth = 0): boolean {
+  if (typeof v === 'string') return v.includes('\u0000');
+  if (depth > 20 || v === null || typeof v !== 'object') return false;
+  return Object.entries(v).some(([k, x]) => k.includes('\u0000') || hasNul(x, depth + 1));
 }
 
 /** Common pagination query parameters. */

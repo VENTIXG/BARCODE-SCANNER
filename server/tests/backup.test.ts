@@ -6,6 +6,7 @@ import { createApp } from '../src/app.js';
 import { config } from '../src/config.js';
 import { getDb, initDb } from '../src/db/index.js';
 import { backupDue } from '../src/lib/backup.js';
+import { addUser } from './users.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -13,14 +14,22 @@ const admin = request.agent(app);
 const productCount = async () => (await getDb().value<number>('SELECT COUNT(*) FROM products')) ?? 0;
 
 beforeAll(async () => {
+  // A first start without ADMIN_PASSWORD: the built-in default password admin123.
+  delete process.env.ADMIN_PASSWORD;
   await initDb();
   expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
 });
 
 describe('first run', () => {
-  it('asks the initial admin to change the default password', async () => {
+  it('the initial admin must change the default password before anything else', async () => {
     const me = await admin.get('/api/auth/me');
     expect(me.body.data.mustChangePassword).toBe(true);
+    const blocked = await admin.get('/api/products');
+    expect(blocked.status).toBe(403);
+    expect(blocked.body.error.code).toBe('PASSWORD_CHANGE_REQUIRED');
+    // The rest of this file works as that administrator.
+    await getDb().run(`UPDATE users SET must_change_password = 0 WHERE username = 'admin'`);
+    expect((await admin.get('/api/products')).status).toBe(200);
   });
 
   it('loads demo data into an empty database only once', async () => {
@@ -33,7 +42,10 @@ describe('first run', () => {
     expect(list.body.data.files.some((f: { name: string }) => f.name.endsWith('_before-demo.json.gz'))).toBe(true);
     // The admin password was not overwritten by the demo users.
     expect((await request(app).post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
-    expect((await request(app).post('/api/auth/login').send({ username: 'manager', password: 'manager123' })).status).toBe(200);
+    // The demo people have public passwords: they are in the history, but cannot sign in.
+    const demoUser = await request(app).post('/api/auth/login').send({ username: 'manager', password: 'manager123' });
+    expect(demoUser.status).toBe(403);
+    expect(demoUser.body.error.code).toBe('ACCOUNT_DISABLED');
   }, 30_000);
 });
 
@@ -83,7 +95,9 @@ describe('backups', () => {
 
   it('only lets administrators manage backups', async () => {
     const mgr = request.agent(app);
-    await mgr.post('/api/auth/login').send({ username: 'manager', password: 'manager123' });
-    expect((await mgr.get('/api/backups')).status).toBe(403);
+    await addUser(admin, mgr, { username: 'backup_manager', role: 'MANAGER', password: 'manager-pass-1' });
+    const res = await mgr.get('/api/backups');
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
   });
 });

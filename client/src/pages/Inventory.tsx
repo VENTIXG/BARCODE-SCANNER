@@ -6,7 +6,7 @@ import { ClipboardCheck, Download, MapPin, Pencil, Plus, SlidersHorizontal, Tras
 import { toast } from 'sonner';
 import { api, download, newIdempotencyKey, type Page } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { fmtMoney, fmtNumber, fmtQty, fmtSigned } from '../lib/format';
+import { fmtMoney, fmtNumber, fmtQty, fmtSigned, parseDecimal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { beep } from '../lib/scanner';
 import { errMsg, useLocations } from '../lib/queries';
@@ -225,8 +225,8 @@ function CountTab() {
   };
   useScanHandler((c) => void onCode(c));
 
-  const counted = lines.filter((l) => l.counted.trim() !== '' && !Number.isNaN(Number(l.counted.replace(',', '.'))));
-  const diffs = counted.filter((l) => Number(l.counted.replace(',', '.')) !== l.product.quantity);
+  const counted = lines.filter((l) => l.counted.trim() !== '' && !Number.isNaN(parseDecimal(l.counted)));
+  const diffs = counted.filter((l) => parseDecimal(l.counted) !== l.product.quantity);
 
   const submit = useMutation({
     mutationFn: () =>
@@ -236,7 +236,7 @@ function CountTab() {
           reason: t(reason),
           reference: reference || null,
           idempotencyKey: idemKey,
-          items: counted.map((l) => ({ productId: l.product.id, countedQuantity: Number(l.counted.replace(',', '.')) })),
+          items: counted.map((l) => ({ productId: l.product.id, countedQuantity: parseDecimal(l.counted) })),
         },
         { retries: 2 },
       ),
@@ -274,7 +274,7 @@ function CountTab() {
             </thead>
             <tbody>
               {lines.map((l) => {
-                const c = l.counted.trim() === '' ? null : Number(l.counted.replace(',', '.'));
+                const c = l.counted.trim() === '' ? null : parseDecimal(l.counted);
                 const d = c == null || Number.isNaN(c) ? null : c - l.product.quantity;
                 return (
                   <tr key={l.product.id}>

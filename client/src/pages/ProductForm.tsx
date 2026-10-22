@@ -5,7 +5,7 @@ import { ArrowLeft, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { ApiError, api } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { fmtQty } from '../lib/format';
+import { fmtQty, parseDecimal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { errMsg, useCategories, useLocations, useSuppliers } from '../lib/queries';
 import type { Product } from '../lib/types';
@@ -28,7 +28,7 @@ interface FormState {
 }
 
 const UNITS = ['pcs', 'box', 'pack', 'kg', 'g', 'lt', 'm', 'roll', 'set', 'pair', 'pallet'];
-const num = (s: string) => (s.trim() === '' ? 0 : Number(s.replace(',', '.')));
+const num = (s: string) => (s.trim() === '' ? 0 : parseDecimal(s));
 
 function QuickCreate({ kind, open, onClose, onCreated }: { kind: 'categories' | 'suppliers'; open: boolean; onClose: () => void; onCreated: (id: number) => void }) {
   const t = useT();

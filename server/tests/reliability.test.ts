@@ -37,8 +37,11 @@ beforeAll(async () => {
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   cookie = await login('admin', 'admin123');
-  const u = await api('POST', '/users', { username: 'rel_worker', fullName: 'Reliability Worker', role: 'WAREHOUSE_USER', password: 'worker-pass-1' });
+  const u = await api('POST', '/users', { username: 'rel_worker', fullName: 'Reliability Worker', role: 'WAREHOUSE_USER', password: 'worker-temp-1' });
   expect(u.status).toBe(201);
+  // The password from the administrator is temporary: the worker chooses their own first.
+  const first = await login('rel_worker', 'worker-temp-1');
+  expect((await api('POST', '/auth/change-password', { currentPassword: 'worker-temp-1', newPassword: 'worker-pass-1' }, first)).status).toBe(200);
   worker = await login('rel_worker', 'worker-pass-1');
 });
 

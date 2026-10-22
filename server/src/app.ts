@@ -6,7 +6,9 @@ import compression from 'compression';
 import { publish, subscribe } from './lib/events.js';
 import helmet from 'helmet';
 import { appVersion, config } from './config.js';
-import { requireAuth, requirePermission } from './middleware/auth.js';
+import { requireAuth, requirePasswordChanged, requirePermission } from './middleware/auth.js';
+import { badRequest } from './lib/errors.js';
+import { hasNul } from './lib/http.js';
 import { getDb } from './db/index.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 import { auditRouter } from './routes/audit.js';
@@ -51,6 +53,10 @@ export function createApp() {
   app.use(compression({ filter: (req, res) => req.path !== '/api/events' && compression.filter(req, res) }));
   app.use(express.json({ limit: '30mb' }));
   app.use(cookieParser());
+  // PostgreSQL text cannot hold NUL characters: refuse them up front instead of failing later.
+  app.use((req, _res, next) =>
+    hasNul(req.query) || hasNul(req.body) ? next(badRequest('The request contains a NUL character', 'INVALID_VALUE')) : next(),
+  );
 
   const api = express.Router();
   api.get('/health', async (_req, res) => {
@@ -71,8 +77,8 @@ export function createApp() {
     next();
   });
 
-  // Everything below requires a signed-in user.
-  api.use(requireAuth);
+  // Everything below requires a signed-in user, who is not on a temporary password.
+  api.use(requireAuth, requirePasswordChanged);
 
   api.get('/events', (req, res) => {
     res.set({

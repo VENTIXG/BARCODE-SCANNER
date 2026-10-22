@@ -288,7 +288,8 @@ async function allSettings() {
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
-settingsRouter.get('/', async (_req, res) => {
+// Administrators only: holds folder paths of the server. Other users get what they need from /auth/me.
+settingsRouter.get('/', requirePermission('settings.manage'), async (_req, res) => {
   res.json({ data: await allSettings() });
 });
 

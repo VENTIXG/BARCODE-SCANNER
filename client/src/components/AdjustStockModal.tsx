@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { toast } from 'sonner';
 import { api, newIdempotencyKey } from '../lib/api';
-import { fmtQty, fmtSigned } from '../lib/format';
+import { fmtQty, fmtSigned, parseDecimal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { errMsg } from '../lib/queries';
 import type { Product, Transaction } from '../lib/types';
@@ -41,7 +41,7 @@ export function AdjustStockModal({ product, open, onClose }: { product: Product;
   }, [open]);
   useEffect(() => setReason(REASONS[mode][0]), [mode]);
 
-  const n = qty === '' ? NaN : Number(qty.replace(',', '.'));
+  const n = parseDecimal(qty);
   const delta = Number.isNaN(n) ? 0 : mode === 'count' ? n - product.quantity : ['ADJUSTMENT_PLUS', 'RETURN_IN'].includes(mode) ? n : -n;
   const newQty = product.quantity + delta;
   const finalReason = reason === '__other' ? custom.trim() : t(reason);

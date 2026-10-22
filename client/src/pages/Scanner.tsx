@@ -5,7 +5,7 @@ import clsx from 'clsx';
 import { ArrowDownToLine, ArrowUpFromLine, CheckCircle2, MapPin, Plus, Search, Trash2, Undo2, Volume2, VolumeX, XCircle } from 'lucide-react';
 import { ApiError, api, newIdempotencyKey } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { fmtQty, fmtTime } from '../lib/format';
+import { fmtQty, fmtTime, parseDecimal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { beep, setSoundEnabled, soundEnabled } from '../lib/scanner';
 import type { Product, Transaction } from '../lib/types';
@@ -87,7 +87,7 @@ export default function Scanner() {
 
   const quantity = () => {
     if (qtyMode === 'one') return 1;
-    const n = Number(String(fixedQty).replace(',', '.'));
+    const n = parseDecimal(String(fixedQty));
     return Number.isFinite(n) && n > 0 ? n : 1;
   };
 
@@ -181,7 +181,7 @@ export default function Scanner() {
 
   const confirmAsk = () => {
     if (!pending) return;
-    const n = Number(askQty.replace(',', '.'));
+    const n = parseDecimal(askQty);
     if (!Number.isFinite(n) || n <= 0) return;
     const p = pending;
     setPending(null);

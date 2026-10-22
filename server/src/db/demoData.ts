@@ -48,10 +48,12 @@ async function seed(db: DB, opts: { keepExistingUsers?: boolean }): Promise<Demo
     { username: 'warehouse2', full_name: 'Eleni Dimitriou', role: 'WAREHOUSE_USER', password: 'warehouse123' },
   ];
   for (const u of users) {
-    // From the app (opts.keepExistingUsers) existing accounts and passwords are left untouched.
+    // From the app (opts.keepExistingUsers) existing accounts and passwords are left untouched,
+    // and the demo people are added inactive: their passwords are public (README), so they
+    // only appear in the history until an administrator activates them with a new password.
     await db.run(
       opts.keepExistingUsers
-        ? `INSERT INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?) ON CONFLICT (username) DO NOTHING`
+        ? `INSERT INTO users (username, full_name, role, password_hash, is_active) VALUES (?, ?, ?, ?, 0) ON CONFLICT (username) DO NOTHING`
         : `INSERT INTO users (username, full_name, role, password_hash) VALUES (?, ?, ?, ?)
        ON CONFLICT (username) DO UPDATE SET password_hash = excluded.password_hash, role = excluded.role, full_name = excluded.full_name`,
       u.username, u.full_name, u.role, await bcrypt.hash(u.password, 10),

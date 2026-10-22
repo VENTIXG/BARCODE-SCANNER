@@ -11,7 +11,7 @@
  */
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { apiLogin as apiLoginAt, launchBrowser, log, testServer, uiLogin as uiLoginAt, until } from './lib.mjs';
+import { apiLogin as apiLoginAt, createUser, launchBrowser, log, testServer, uiLogin as uiLoginAt, until } from './lib.mjs';
 
 const srv = testServer(Number(process.env.E2E_PORT ?? 4711));
 const BASE = srv.base;
@@ -43,10 +43,8 @@ before(async () => {
   for (const u of [
     { username: 'e2e_wh1', fullName: 'Warehouse Employee', role: 'WAREHOUSE_USER', password: 'warehouse-pass-1' },
     { username: 'e2e_mgr', fullName: 'Office Manager', role: 'MANAGER', password: 'manager-pass-1' },
-  ]) {
-    const r = await fetch(`${BASE}/api/users`, { method: 'POST', headers: h, body: JSON.stringify(u) });
-    assert.equal(r.status, 201, `create user ${u.username}`);
-  }
+  ])
+    await createUser(BASE, cookieAdmin, u);
   const p = await fetch(`${BASE}/api/products`, {
     method: 'POST',
     headers: h,

@@ -10,7 +10,7 @@ import clsx from 'clsx';
 import { AlertTriangle, CheckCircle2, FileText, FileUp, RotateCcw, Search, Upload } from 'lucide-react';
 import { ApiError, api, newIdempotencyKey } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { fmtDate, fmtMoney, fmtNumber, todayLocal } from '../lib/format';
+import { fmtDate, fmtMoney, fmtNumber, parseDecimal, todayLocal } from '../lib/format';
 import { useT } from '../lib/i18n';
 import { errMsg, useSuppliers } from '../lib/queries';
 import type { Product } from '../lib/types';
@@ -127,7 +127,7 @@ function useMessage() {
     return t(msg);
   };
 }
-const parseNum = (s: string) => (s.trim() === '' ? null : Number(s.replace(/\s/g, '').replace(',', '.')));
+const parseNum = (s: string) => (s.trim() === '' ? null : parseDecimal(s));
 
 export default function InvoiceImport() {
   const t = useT();

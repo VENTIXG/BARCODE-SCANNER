@@ -5,6 +5,7 @@ import { EmptyState, LoadingBlock } from './components/ui';
 import { useAuth } from './lib/auth';
 import { useT } from './lib/i18n';
 import { LoginPage } from './pages/Login';
+import { PasswordRequired } from './pages/PasswordRequired';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Products = lazy(() => import('./pages/Products'));
@@ -42,6 +43,15 @@ export function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="*" element={<Navigate to="/login" replace state={{ from: location.pathname + location.search }} />} />
+      </Routes>
+    );
+
+  // A temporary password opens nothing but the password change (the server enforces it too).
+  if (user.mustChangePassword)
+    return (
+      <Routes>
+        <Route path="/login" element={<Navigate to="/" replace />} />
+        <Route path="*" element={<PasswordRequired />} />
       </Routes>
     );
 

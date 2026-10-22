@@ -7,6 +7,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { getDb, initDb } from '../src/db/index.js';
+import { addUser } from './users.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -55,9 +56,7 @@ beforeAll(async () => {
     expect(res.status, JSON.stringify(res.body)).toBe(201);
     ids[key] = res.body.data.id;
   }
-  const u = await admin.post('/api/users').send({ username: 'inv_worker', fullName: 'Invoice Worker', role: 'WAREHOUSE_USER', password: 'worker-pass-1', isActive: true });
-  expect(u.status).toBe(201);
-  expect((await worker.post('/api/auth/login').send({ username: 'inv_worker', password: 'worker-pass-1' })).status).toBe(200);
+  await addUser(admin, worker, { username: 'inv_worker', fullName: 'Invoice Worker', role: 'WAREHOUSE_USER', password: 'worker-pass-1' });
 });
 
 describe('matching invoice lines', () => {
@@ -115,6 +114,7 @@ describe('receiving the invoice', () => {
   it('a warehouse user cannot create new products from an invoice', async () => {
     const res = await commit({}, worker);
     expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
   });
 
   it('posts a goods receipt with the invoice number and the invoice text of every line', async () => {

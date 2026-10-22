@@ -109,6 +109,11 @@ export interface ProductFilters {
   stock?: 'low' | 'out' | 'in' | 'alert';
 }
 
+/** Products whose SKU or barcode is @q, and whose name is @q (by the indexes of migration 101). */
+const EXACT_CODE = `SELECT id FROM products WHERE ims_key(sku::text) = ims_key(@q)
+  UNION SELECT id FROM products WHERE ims_compact(barcode::text) = ims_compact(@q)`;
+const EXACT_NAME = 'SELECT id FROM products WHERE ims_key(name) = ims_key(@q)';
+
 /** Builds WHERE clause + params shared by list, export and search. */
 export function buildProductWhere(f: ProductFilters, warehouseId: number) {
   const where: string[] = [];
@@ -117,8 +122,9 @@ export function buildProductWhere(f: ProductFilters, warehouseId: number) {
     const q = f.q.trim();
     params.q = q;
     params.like = `%${escapeLike(q)}%`;
-    // An exact SKU, barcode or name (spaces and letter case ignored), or every word below.
-    const parts = ['ims_key(p.sku::text) = ims_key(@q)', 'ims_compact(p.barcode::text) = ims_compact(@q)', 'ims_key(p.name) = ims_key(@q)'];
+    // An exact SKU, barcode or name (spaces and letter case ignored), or every word below. The
+    // exact matches are looked up through their indexes (not computed for every product).
+    const parts = [`p.id IN (${EXACT_CODE} UNION ${EXACT_NAME})`];
     // Every word must appear in name, SKU, barcode or description (accents and case ignored).
     const words = searchWords(q);
     if (words.length) {
@@ -178,9 +184,7 @@ export function orderBy(sort: string | undefined, dir: string | undefined, hasQu
   const col = sort && SORTS[sort];
   if (col) return `ORDER BY ${col} ${direction}, p.id`;
   // Relevance: exact SKU/barcode matches first.
-  if (hasQuery)
-    return `ORDER BY COALESCE(ims_key(p.sku::text) = ims_key(@q) OR ims_compact(p.barcode::text) = ims_compact(@q), false) DESC,
-      COALESCE(ims_key(p.name) = ims_key(@q), false) DESC, lower(p.name), p.id`;
+  if (hasQuery) return `ORDER BY (p.id IN (${EXACT_CODE})) DESC, (p.id IN (${EXACT_NAME})) DESC, lower(p.name), p.id`;
   return 'ORDER BY lower(p.name), p.id';
 }
 

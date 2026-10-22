@@ -120,10 +120,23 @@ describe('typing in forms, key by key', () => {
     await until(async () => (await page.getByRole('dialog').count()) === 0, 'dialog closes after save');
     await until(async () => (await page.locator('tbody tr', { hasText: 'maria.p' }).count()) === 1, 'new user listed');
 
-    // The new user signs in on another PC.
+    // The new user signs in on another PC: the password given by the administrator is
+    // temporary, so the first screen asks for their own (nothing else opens before that).
     const other = await (await browser.newContext()).newPage();
-    await uiLogin(other, BASE, 'maria.p', 'maria-pass-123');
-    assert.equal(new URL(other.url()).pathname, '/');
+    await other.goto(`${BASE}/login`);
+    await other.fill('input[autocomplete=username]', 'maria.p');
+    await other.fill('input[type=password]', 'maria-pass-123');
+    await other.click('button[type=submit]');
+    await other.getByText('Ορίστε δικό σας κωδικό').waitFor();
+    const blocked = await other.evaluate(() => fetch('/api/products').then((r) => r.status));
+    assert.equal(blocked, 403, 'nothing but the password change is allowed');
+    await other.fill('input[autocomplete=current-password]', 'maria-pass-123');
+    await other.locator('input[autocomplete=new-password]').nth(0).fill('maria-own-pass-1');
+    await other.locator('input[autocomplete=new-password]').nth(1).fill('maria-own-pass-1');
+    await other.getByRole('button', { name: 'Αποθήκευση και συνέχεια' }).click();
+    await other.waitForURL(`${BASE}/`);
+    await other.getByRole('link', { name: 'Πίνακας ελέγχου' }).first().waitFor();
+    assert.equal(await other.evaluate(() => fetch('/api/products').then((r) => r.status)), 200);
     await other.context().close();
   });
 

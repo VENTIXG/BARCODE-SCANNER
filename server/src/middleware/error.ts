@@ -38,6 +38,11 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     else if (e.code === '23503' || e.code === '23001') message = 'This record is referenced by other data and cannot be changed';
     return res.status(409).json({ error: { message, code: 'CONSTRAINT' } });
   }
+  // PostgreSQL data exceptions (class 22): a number out of range, text the database cannot
+  // hold, an invalid date ... The request was wrong, nothing was written.
+  if (typeof e?.code === 'string' && /^22[0-9A-Z]{3}$/.test(e.code)) {
+    return res.status(400).json({ error: { message: 'A value in the request is out of range or invalid', code: 'INVALID_VALUE' } });
+  }
   if (e?.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({ error: { message: 'File is too large', code: 'TOO_LARGE' } });
   }

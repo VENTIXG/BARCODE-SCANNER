@@ -7,6 +7,7 @@ import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { appVersion } from '../src/config.js';
 import { initDb } from '../src/db/index.js';
+import { addUser } from './users.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -15,8 +16,7 @@ const manager = request.agent(app);
 beforeAll(async () => {
   await initDb();
   expect((await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' })).status).toBe(200);
-  await admin.post('/api/users').send({ username: 'mgr1', fullName: 'Manager One', role: 'MANAGER', password: 'manager-pass-1' });
-  expect((await manager.post('/api/auth/login').send({ username: 'mgr1', password: 'manager-pass-1' })).status).toBe(200);
+  await addUser(admin, manager, { username: 'mgr1', fullName: 'Manager One', role: 'MANAGER', password: 'manager-pass-1' });
 });
 
 describe('update status', () => {

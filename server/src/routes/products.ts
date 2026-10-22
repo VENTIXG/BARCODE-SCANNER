@@ -1,4 +1,3 @@
-import path from 'node:path';
 import crypto from 'node:crypto';
 import { Router } from 'express';
 import multer from 'multer';
@@ -244,12 +243,27 @@ productsRouter.put('/:id', requirePermission('products.manage'), async (req, res
   const db = getDb();
   const actor = actorOf(req);
   const id = idParam(req.params.id);
-  const body = productBody.parse(req.body);
+  const parsed = productBody.parse(req.body);
+  // A field left out of the request keeps its stored value: an update that only sends some
+  // fields never resets prices, stock levels or the location to their defaults.
+  const sent = (k: string) => Object.prototype.hasOwnProperty.call(req.body ?? {}, k);
 
   await db.tx(async (t) => {
     const warehouseId = await getDefaultWarehouseId(t);
     const before = await getProduct(t, id);
     if (!before) throw notFound('Product not found');
+    const body = {
+      ...parsed,
+      barcode: sent('barcode') ? parsed.barcode : before.barcode,
+      description: sent('description') ? parsed.description : before.description,
+      categoryId: sent('categoryId') ? parsed.categoryId : before.category_id,
+      supplierId: sent('supplierId') ? parsed.supplierId : before.supplier_id,
+      unit: sent('unit') ? parsed.unit : before.unit,
+      minStock: sent('minStock') ? parsed.minStock : before.min_stock,
+      purchasePrice: sent('purchasePrice') ? parsed.purchasePrice : before.purchase_price,
+      sellingPrice: sent('sellingPrice') ? (parsed.sellingPrice ?? null) : before.selling_price,
+      status: sent('status') ? parsed.status : before.status,
+    };
     // Only re-check the barcode if it actually changed.
     await assertCodesAvailable(
       t,
@@ -270,13 +284,15 @@ productsRouter.put('/:id', requirePermission('products.manage'), async (req, res
       body.unit,
       body.minStock,
       body.purchasePrice,
-      body.sellingPrice === undefined ? before.selling_price : body.sellingPrice,
+      body.sellingPrice,
       body.status,
       nowIso(),
       id,
     );
-    const locationId = body.locationCode ? await findOrCreateLocation(t, warehouseId, body.locationCode) : null;
-    await setProductLocation(t, id, warehouseId, locationId);
+    if (sent('locationCode')) {
+      const locationId = body.locationCode ? await findOrCreateLocation(t, warehouseId, body.locationCode) : null;
+      await setProductLocation(t, id, warehouseId, locationId);
+    }
 
     const after = (await getProduct(t, id))!;
     const d = diff(before, after, FIELD_LABELS);
@@ -423,6 +439,16 @@ productsRouter.post('/:id/variants', requirePermission('products.manage'), async
 
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
 
+/** The image type from the file's first bytes; null when it is not a JPG, PNG, WEBP or GIF. */
+export function sniffImage(b: Buffer): { type: string; ext: string } | null {
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { type: 'image/jpeg', ext: '.jpg' };
+  if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return { type: 'image/png', ext: '.png' };
+  if (b.length >= 6 && /^GIF8[79]a$/.test(b.subarray(0, 6).toString('latin1'))) return { type: 'image/gif', ext: '.gif' };
+  if (b.length >= 12 && b.subarray(0, 4).toString('latin1') === 'RIFF' && b.subarray(8, 12).toString('latin1') === 'WEBP')
+    return { type: 'image/webp', ext: '.webp' };
+  return null;
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 },
@@ -437,12 +463,14 @@ productsRouter.post('/:id/image', requirePermission('products.manage'), upload.s
   const id = idParam(req.params.id);
   if (!req.file) throw badRequest('No image uploaded');
   const file = req.file;
+  // The declared type is only what the browser says: the content must really be an image.
+  const image = sniffImage(file.buffer);
+  if (!image) throw badRequest('Only JPG, PNG, WEBP or GIF images are allowed');
   await db.tx(async (t) => {
     const p = await getProduct(t, id);
     if (!p) throw notFound('Product not found');
-    const ext = path.extname(file.originalname).toLowerCase().replace(/[^.a-z0-9]/g, '') || '.jpg';
-    const name = `p_${crypto.randomBytes(10).toString('hex')}${ext}`;
-    await t.run('INSERT INTO product_images (name, product_id, content_type, data) VALUES (?, ?, ?, ?)', name, id, file.mimetype, file.buffer);
+    const name = `p_${crypto.randomBytes(10).toString('hex')}${image.ext}`;
+    await t.run('INSERT INTO product_images (name, product_id, content_type, data) VALUES (?, ?, ?, ?)', name, id, image.type, file.buffer);
     await t.run('UPDATE products SET image_path = ?, updated_at = ? WHERE id = ?', name, nowIso(), id);
     if (p.image_path) await t.run('DELETE FROM product_images WHERE name = ?', p.image_path);
     await audit(t, actorOf(req), {

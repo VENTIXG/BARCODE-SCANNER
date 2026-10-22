@@ -3,6 +3,7 @@ import request from 'supertest';
 import ExcelJS from 'exceljs';
 import { createApp } from '../src/app.js';
 import { getDb, initDb } from '../src/db/index.js';
+import { addUser } from './users.js';
 
 const app = createApp();
 const admin = request.agent(app);
@@ -18,11 +19,7 @@ beforeAll(async () => {
   await initDb();
   const res = await admin.post('/api/auth/login').send({ username: 'admin', password: 'admin123' });
   expect(res.status).toBe(200);
-  const u = await admin
-    .post('/api/users')
-    .send({ username: 'worker', fullName: 'Warehouse Worker', role: 'WAREHOUSE_USER', password: 'worker123', isActive: true });
-  expect(u.status).toBe(201);
-  expect((await worker.post('/api/auth/login').send({ username: 'worker', password: 'worker123' })).status).toBe(200);
+  await addUser(admin, worker, { username: 'worker', fullName: 'Warehouse Worker', role: 'WAREHOUSE_USER', password: 'worker123' });
 });
 
 describe('authentication & authorization', () => {

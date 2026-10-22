@@ -29,7 +29,8 @@ Demo accounts created by `npm run seed`:
 | `warehouse2` | `warehouse123` | WAREHOUSE USER  |
 
 Without the seed, an empty database is created on first start with a single
-`admin` user (password from `ADMIN_PASSWORD`, default `admin123`). **Change it after the first login.**
+`admin` user (password from `ADMIN_PASSWORD`, default `admin123`). With the built-in default the
+first sign-in opens only the screen to choose a new password; nothing else works until then.
 
 `npm run seed -- --reset` deletes the database and recreates the demo data.
 
@@ -95,10 +96,13 @@ Pushes without a new version build and test everything without publishing (files
 npm test                       # unit / API tests (built-in PostgreSQL, real HTTP); with S3_TEST_ENDPOINT also cloud backups
 TEST_DATABASE_URL=postgres://postgres:pw@localhost:5432/postgres npm test   # the same on a PostgreSQL server (a database per test file)
 npm run typecheck
-npm run build && npm run e2e   # browsers: two PCs on one server (live updates, reconnect), typing in every form
+npm run build && npm run e2e   # browsers: two PCs on one server (live updates, reconnect), typing in every form,
+                               # supplier invoices, Excel import, every screen for every role on desktop and phone,
+                               # and a whole warehouse day (create, edit, count, Excel, invoice, export, compare)
 npm run stage --prefix desktop && npm run e2e:desktop   # the Electron app: start screen, server/offline/local modes
 npm run test:server-lifecycle  # Docker: install.sh, update, broken update with automatic rollback, backup/restore,
                                # update of a 1.2.0 server (SQLite) to this version and back
+npx tsx e2e/perf.mts 10000     # performance: 10,000-product import/export, search, scans, a crash during an import
 ```
 
 CI runs all of them (`.github/workflows/ci.yml`); the Windows auto-update test runs in `release.yml`.
@@ -124,7 +128,7 @@ CI runs all of them (`.github/workflows/ci.yml`); the Windows auto-update test r
 | **Excel export** | All products in the five standard columns (re-importable), all products with every field, current inventory, low stock, stock movement history, Stock IN, Stock OUT, receipt lines, dispatch lines, products per category and per supplier (one sheet each + summary). |
 | **Reports** | Period report: received/dispatched units, returns, adjustments, IN vs OUT per day, top dispatched/received products, movements by type, activity by user, adjustments list, stock without sales; stock valuation by category / supplier / zone. |
 | **Global search** | Barcode, SKU, product name, supplier, category — full-text index (accent-insensitive, works for Greek); scanning into the search box opens the product. Press `/` to focus it. |
-| **Users & roles** | ADMIN (everything), MANAGER (products, inventory, adjustments, import/export, reports, activity log), WAREHOUSE USER (scanner, stock in/out, product lookup). Deactivation / role change / password reset signs the user out immediately. |
+| **Users & roles** | ADMIN (everything), MANAGER (products, inventory, adjustments, import/export, reports, activity log), WAREHOUSE USER (scanner, stock in/out, product lookup). Deactivation / role change / password reset signs the user out immediately. A password set by an administrator is temporary: at the first sign-in the user must choose their own before anything else works. |
 | **Activity log** | User, action, product, previous value, new value, date, time, IP and user agent — e.g. *"admin changed minimum stock from "10" to "20" on ABC123"*, *"warehouse1 added 30 units to ABC123"*. Login attempts are logged too. |
 
 ### Barcode scanners
@@ -203,7 +207,11 @@ UI work only (every stock row and transaction already carries `warehouse_id`).
 - Passwords hashed with bcrypt; login rate-limited; constant-time path for unknown users.
 - Session: signed JWT in an `httpOnly`, `SameSite=Strict` cookie (`COOKIE_SECURE=true` over HTTPS). The user is re-loaded on every request, so disabled users / role changes take effect immediately.
 - Authorization is enforced on the server for every endpoint (`requirePermission`), the UI only hides what a role cannot do.
-- All input validated with Zod; SQL uses bound parameters only; Helmet CSP; uploads limited to images ≤ 5 MB and served only to signed-in users.
+- Temporary passwords (the built-in first one, or one set by an administrator) open nothing but the password change, enforced by the server (`403 PASSWORD_CHANGE_REQUIRED`).
+- Demo data loaded from the app adds its demo people **inactive** (their passwords are public); an administrator can activate them with a new password.
+- All input validated with Zod; SQL uses bound parameters only (sorting by whitelisted columns); text with NUL characters and numbers beyond the database's range are refused with `400`; Helmet CSP.
+- Uploads: product photos are checked by their content (JPG, PNG, WEBP, GIF), at most 5 MB, served only to signed-in users with `nosniff`. Excel exports write every value as plain cell text/numbers, never as a formula.
+- Company settings (including server folders) are readable by administrators only.
 
 ### Main API endpoints
 

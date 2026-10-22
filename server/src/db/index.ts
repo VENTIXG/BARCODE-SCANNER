@@ -196,16 +196,18 @@ async function ensureBaseData(db: Database, quiet = false) {
           'First start needs ADMIN_PASSWORD (at least 12 characters, not the default). Set it in the environment and start again.',
         );
       }
-      // A first admin with the well-known default password must change it after signing in.
+      // A first admin with the built-in default password must change it after signing in (the
+      // server refuses everything else until then). A password set in ADMIN_PASSWORD was chosen.
+      const builtIn = !process.env.ADMIN_PASSWORD;
       await t.run(
         `INSERT INTO users (username, full_name, password_hash, role, must_change_password) VALUES ('admin', 'Administrator', ?, 'ADMIN', ?)`,
         bcrypt.hashSync(password, 10),
-        password === 'admin123' ? 1 : 0,
+        builtIn ? 1 : 0,
       );
       // Never print the password: logs are often shared or kept.
       if (!quiet && !process.env.VITEST)
         console.log(
-          password === 'admin123'
+          builtIn
             ? "[setup] Created initial admin user 'admin' with the default password. Change it after the first login."
             : "[setup] Created initial admin user 'admin' with the password from ADMIN_PASSWORD.",
         );

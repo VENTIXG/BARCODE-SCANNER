@@ -671,8 +671,10 @@ export const el: Record<string, string> = {
   'Scan the barcode into the form and enter the opening quantity.': 'Σκανάρετε το barcode στη φόρμα και γράψτε την αρχική ποσότητα.',
   'No products yet': 'Δεν υπάρχουν προϊόντα ακόμη',
   'Ask a manager to add products or import them from Excel.': 'Ζητήστε από έναν υπεύθυνο να προσθέσει προϊόντα ή να τα εισάγει από Excel.',
-  'You are using a temporary or default password. Change it now so nobody else can sign in as you.':
-    'Χρησιμοποιείτε προσωρινό ή προεπιλεγμένο κωδικό. Αλλάξτε τον τώρα, ώστε να μην μπορεί κανείς άλλος να συνδεθεί ως εσείς.',
+  'Choose your own password': 'Ορίστε δικό σας κωδικό',
+  '{user}, you signed in with a temporary password. Choose your own to continue, so nobody else can sign in as you.':
+    '{user}, συνδεθήκατε με προσωρινό κωδικό. Ορίστε δικό σας για να συνεχίσετε, ώστε να μην μπορεί κανείς άλλος να συνδεθεί ως εσείς.',
+  'Save and continue': 'Αποθήκευση και συνέχεια',
   Backups: 'Αντίγραφα ασφαλείας (backup)',
   'A copy of the whole database is saved automatically once a day.': 'Αντίγραφο ολόκληρης της βάσης αποθηκεύεται αυτόματα μία φορά την ημέρα.',
   'Back up now': 'Backup τώρα',

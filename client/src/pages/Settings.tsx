@@ -27,7 +27,8 @@ export default function Settings() {
   const admin = can('settings.manage');
   const [sound, setSound] = useState(soundEnabled());
 
-  const settings = useQuery({ queryKey: ['settings'], queryFn: () => api.get<{ data: Record<string, string> }>('/settings').then((r) => r.data) });
+  // Company settings are for administrators; everyone gets the device preferences below.
+  const settings = useQuery({ queryKey: ['settings'], queryFn: () => api.get<{ data: Record<string, string> }>('/settings').then((r) => r.data), enabled: admin });
   const warehouses = useQuery({ queryKey: ['warehouses'], queryFn: () => api.get<{ data: Warehouse[] }>('/warehouses').then((r) => r.data) });
 
   const [s, setS] = useState<Record<string, string>>({});
