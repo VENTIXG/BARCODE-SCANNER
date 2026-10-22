@@ -1,6 +1,6 @@
 {
   "name": "warehouse-ims",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "private": true,
   "description": "Inventory Management System with barcode scanning, Excel import/export and full audit trail",
   "workspaces": [
