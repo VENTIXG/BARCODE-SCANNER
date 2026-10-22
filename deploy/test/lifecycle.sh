@@ -237,6 +237,9 @@ check "reset-password prints a temporary password" test -n "$temp"
 check "the old password no longer works" test "$(login admin "$ADMIN_PASSWORD")" == 401
 check "the temporary password works" test "$(login admin "$temp")" == 200
 check "and must be changed" bash -c "curl -sk --noproxy '*' -b $COOKIES --resolve $DOMAIN:$HTTPS_PORT:127.0.0.1 https://$DOMAIN:$HTTPS_PORT/api/auth/me | grep -q '\"mustChangePassword\":true'"
+check "nothing else opens before the change" test "$(api /products -o /dev/null -w '%{http_code}')" == 403
+code="$(api /auth/change-password -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"currentPassword\":\"$temp\",\"newPassword\":\"$ADMIN_PASSWORD\"}")"
+check "the admin chooses a password and works again" test "$code/$(stock_of_test_product)" == "200/42"
 
 step "Manual rollback to $V1"
 IMS_FORCE=1 ims rollback
