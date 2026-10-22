@@ -152,7 +152,8 @@ export default function Products() {
                   <Th sort="location" current={filters.sort} dir={filters.dir} onSort={onSort}>{t('Location')}</Th>
                   <Th sort="quantity" current={filters.sort} dir={filters.dir} onSort={onSort} align="right">{t('Stock')}</Th>
                   <Th sort="minStock" current={filters.sort} dir={filters.dir} onSort={onSort} align="right" className="hidden md:table-cell">{t('Min')}</Th>
-                  <Th sort="sellingPrice" current={filters.sort} dir={filters.dir} onSort={onSort} align="right" className="hidden lg:table-cell">{t('Price')}</Th>
+                  <Th sort="purchasePrice" current={filters.sort} dir={filters.dir} onSort={onSort} align="right" className="hidden lg:table-cell">{t('Purchase Price')}</Th>
+                  <Th sort="sellingPrice" current={filters.sort} dir={filters.dir} onSort={onSort} align="right" className="hidden sm:table-cell">{t('Selling Price')}</Th>
                   <Th className="hidden md:table-cell">{t('Status')}</Th>
                 </tr>
               </thead>
@@ -180,7 +181,8 @@ export default function Products() {
                       </div>
                     </Td>
                     <Td align="right" className="tabular hidden text-fg-2 md:table-cell">{fmtQty(p.minStock)}</Td>
-                    <Td align="right" className="tabular hidden whitespace-nowrap lg:table-cell">{fmtMoney(p.sellingPrice)}</Td>
+                    <Td align="right" className="tabular hidden whitespace-nowrap text-fg-2 lg:table-cell">{fmtMoney(p.purchasePrice)}</Td>
+                    <Td align="right" className="tabular hidden whitespace-nowrap sm:table-cell">{fmtMoney(p.sellingPrice)}</Td>
                     <Td className="hidden md:table-cell"><StatusBadge status={p.status} /></Td>
                   </tr>
                 ))}

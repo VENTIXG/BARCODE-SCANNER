@@ -13,6 +13,7 @@
  */
 import { getDefaultWarehouseId, normalizeText, nowIso, type DB } from '../db/index.js';
 import { audit, type Actor } from './audit.js';
+import { badRequest, conflict } from './errors.js';
 import { findOrCreateLocation } from './locations.js';
 import { cleanText, keysFor, loadCatalog, type CatalogProduct } from './matching.js';
 import { adjustToCount, applyStockChange, round3, setProductLocation } from './stock.js';
@@ -36,13 +37,21 @@ export type ImportField = (typeof IMPORT_FIELDS)[number];
 
 export type RawRow = { rowNumber: number } & Partial<Record<ImportField, unknown>>;
 
+export type QuantityMode = 'ignore' | 'set' | 'add';
+
 export interface ImportOptions {
   duplicateStrategy: 'skip' | 'update' | 'ask';
   /** Per-row decision when duplicateStrategy = 'ask'. */
   decisions?: Record<string, 'skip' | 'update'>;
-  /** What to do with the Quantity column for existing products. */
-  quantityMode: 'ignore' | 'set' | 'add';
+  /**
+   * What to do with the Quantity column for existing products. No default: when the file has
+   * quantities for products that already exist, the person must choose (add, set or leave).
+   */
+  quantityMode?: QuantityMode;
   createMissing: boolean;
+  /** SHA-256 of the file: adding the same file to stock again needs allowDuplicate. */
+  fileHash?: string | null;
+  allowDuplicate?: boolean;
 }
 
 interface CleanRow {
@@ -67,7 +76,15 @@ export interface RowResult {
   errors: string[];
   warnings: string[];
   /** keepSku: matched by barcode, and the SKU column holds the product's description, not a new SKU. */
-  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' | 'name'; keepSku?: boolean };
+  match?: {
+    id: number;
+    sku: string;
+    name: string;
+    matchedBy: 'sku' | 'barcode' | 'name';
+    keepSku?: boolean;
+    /** Stock and prices now, to show what the import changes. */
+    current?: { quantity: number; purchasePrice: number; sellingPrice: number | null };
+  };
   data?: CleanRow;
 }
 
@@ -75,12 +92,41 @@ export interface RowResult {
 const text = cleanText;
 const CONTROL = /[\u0000-\u001f\u007f]/;
 
-/** Accepts 12.5, "12,5", "1.234,56", "1,234.56", "€ 12,00". */
-export function parseNumber(v: unknown): number | null | typeof NaN {
+/** How a file writes numbers that are text cells: "1.250,50" (comma) or "1,250.50" (dot). */
+export type NumberStyle = 'comma' | 'dot' | null;
+
+const NUMBER_FIELDS = ['quantity', 'minStock', 'purchasePrice', 'sellingPrice'] as const;
+
+/**
+ * The decimal separator of the file, from the text numbers that can only be read one way
+ * ("12,50" and "1.234,5": comma; "12.50" and "1,234.5": dot). null when the file has none, or
+ * has both.
+ */
+export function numberStyleOf(rows: RawRow[]): NumberStyle {
+  let comma = false;
+  let dot = false;
+  for (const r of rows)
+    for (const f of NUMBER_FIELDS) {
+      const v = r[f];
+      if (typeof v !== 'string') continue;
+      const s = v.replace(/[\s€$£]/g, '');
+      if (/^-?\d+,\d{1,2}$/.test(s) || /^-?\d{1,3}(\.\d{3})+,\d+$/.test(s)) comma = true;
+      else if (/^-?\d+\.\d{1,2}$/.test(s) || /^-?\d{1,3}(,\d{3})+\.\d+$/.test(s)) dot = true;
+    }
+  return comma === dot ? null : comma ? 'comma' : 'dot';
+}
+
+/**
+ * Accepts 12.5, "12,5", "1.234,56", "1,234.56", "€ 12,00". With the file's number style,
+ * "1.250" is 1250 in a file that writes decimals with a comma (and "1,250" in one with a dot).
+ */
+export function parseNumber(v: unknown, style: NumberStyle = null): number | null | typeof NaN {
   if (v === undefined || v === null || v === '') return null;
   if (typeof v === 'number') return v;
   let s = String(v).replace(/[\s€$£]/g, '');
   if (s === '') return null;
+  if (style === 'comma' && /^-?\d{1,3}(\.\d{3})+(,\d*)?$/.test(s)) return Number(s.replace(/\./g, '').replace(',', '.'));
+  if (style === 'dot' && /^-?\d{1,3}(,\d{3})+(\.\d*)?$/.test(s)) return Number(s.replace(/,/g, ''));
   const lastComma = s.lastIndexOf(',');
   const lastDot = s.lastIndexOf('.');
   if (lastComma > -1 && lastDot > -1) {
@@ -100,9 +146,9 @@ function parseStatus(v: unknown): 'ACTIVE' | 'INACTIVE' | null | undefined {
   return undefined;
 }
 
-function cleanRow(raw: RawRow, errors: string[], warnings: string[]): CleanRow {
+function cleanRow(raw: RawRow, errors: string[], warnings: string[], style: NumberStyle): CleanRow {
   const num = (field: ImportField, label: string) => {
-    const n = parseNumber(raw[field]);
+    const n = parseNumber(raw[field], style);
     if (n === null) return null;
     if (Number.isNaN(n)) {
       errors.push(`${label} "${String(raw[field])}" is not a valid number`);
@@ -150,10 +196,11 @@ function cleanRow(raw: RawRow, errors: string[], warnings: string[]): CleanRow {
 
 export async function validateRows(db: DB, rows: RawRow[]): Promise<RowResult[]> {
   const catalog = await loadCatalog(db);
+  const style = numberStyleOf(rows);
   const cleaned = rows.map((raw) => {
     const errors: string[] = [];
     const warnings: string[] = [];
-    return { raw, errors, warnings, data: cleanRow(raw, errors, warnings) };
+    return { raw, errors, warnings, data: cleanRow(raw, errors, warnings, style) };
   });
   const keys = await keysFor(db, cleaned.flatMap((c) => [c.data.sku, c.data.barcode, c.data.name]));
   const keyOf = (v: string | null) => (v ? (keys.get(v)?.key ?? '') : '');
@@ -163,7 +210,7 @@ export async function validateRows(db: DB, rows: RawRow[]): Promise<RowResult[]>
   const seenBarcode = new Map<string, number>();
   const seenProduct = new Map<number, number>();
 
-  return cleaned.map(({ raw, errors, warnings, data }) => {
+  const results = cleaned.map(({ raw, errors, warnings, data }) => {
     const result: RowResult = { rowNumber: raw.rowNumber, status: 'new', errors, warnings, data };
     const skuKey = keyOf(data.sku);
     const barcodeKey = compactOf(data.barcode);
@@ -236,7 +283,54 @@ export async function validateRows(db: DB, rows: RawRow[]): Promise<RowResult[]>
     result.status = errors.length ? 'error' : result.match ? 'existing' : 'new';
     return result;
   });
+
+  // Stock and prices of the existing products now (default warehouse), shown next to the file's values.
+  const ids = results.filter((r) => r.status === 'existing').map((r) => r.match!.id);
+  if (ids.length) {
+    const warehouseId = await getDefaultWarehouseId(db);
+    const now = await db.all<{ id: number; quantity: number; purchase_price: number; selling_price: number | null }>(
+      `SELECT p.id, COALESCE(i.quantity, 0) AS quantity, p.purchase_price, p.selling_price
+       FROM products p LEFT JOIN inventory i ON i.product_id = p.id AND i.warehouse_id = ?
+       WHERE p.id IN (SELECT value::int FROM jsonb_array_elements_text(?::jsonb))`,
+      warehouseId,
+      JSON.stringify(ids),
+    );
+    const byId = new Map(now.map((p) => [p.id, p]));
+    for (const r of results) {
+      const p = r.status === 'existing' ? byId.get(r.match!.id) : undefined;
+      if (p) r.match!.current = { quantity: p.quantity, purchasePrice: p.purchase_price, sellingPrice: p.selling_price };
+    }
+  }
+  return results;
 }
+
+export interface PreviousImport {
+  id: number;
+  fileName: string | null;
+  quantityMode: QuantityMode | null;
+  imported: number;
+  updated: number;
+  stockRows: number;
+  username: string | null;
+  createdAt: string;
+}
+
+/** Earlier imports of the same file (same content), newest first. */
+export async function previousImports(db: DB, fileHash: string | null | undefined): Promise<PreviousImport[]> {
+  if (!fileHash) return [];
+  return db.all<PreviousImport>(
+    `SELECT pi.id, pi.file_name AS "fileName", pi.quantity_mode AS "quantityMode", pi.imported, pi.updated,
+            pi.stock_rows AS "stockRows", u.username, pi.created_at AS "createdAt"
+     FROM product_imports pi LEFT JOIN users u ON u.id = pi.created_by
+     WHERE pi.file_hash = ? ORDER BY pi.id DESC LIMIT 5`,
+    fileHash,
+  );
+}
+
+/** Rows that update an existing product under these options. */
+const updatesExisting = (r: RowResult, options: Pick<ImportOptions, 'duplicateStrategy' | 'decisions'>) =>
+  r.status === 'existing' &&
+  (options.duplicateStrategy === 'ask' ? options.decisions?.[String(r.rowNumber)] === 'update' : options.duplicateStrategy === 'update');
 
 export interface ImportSummary {
   imported: number;
@@ -279,6 +373,26 @@ export async function importRows(
     };
 
     const results = await validateRows(t, rows);
+    // Quantities for existing products are never dropped silently: the person chooses what they mean.
+    const withQuantity = results.filter((r) => updatesExisting(r, options) && r.data?.quantity != null);
+    if (withQuantity.length && !options.quantityMode)
+      throw badRequest(
+        `The file has quantities for ${withQuantity.length} existing products: choose whether to add them to stock, set the stock to them, or leave the stock unchanged`,
+        'QUANTITY_MODE_REQUIRED',
+        { rows: withQuantity.length },
+      );
+    const quantityMode: QuantityMode = options.quantityMode ?? 'ignore';
+    // The same file added to stock a second time: only when confirmed.
+    if (quantityMode === 'add' && !options.allowDuplicate && withQuantity.some((r) => r.data!.quantity! > 0)) {
+      const earlier = (await previousImports(t, options.fileHash)).filter((p) => p.stockRows > 0);
+      if (earlier.length)
+        throw conflict(
+          `This file was already imported on ${earlier[0].createdAt.slice(0, 16).replace('T', ' ')}${earlier[0].username ? ` by ${earlier[0].username}` : ''}. Confirm to add its quantities to stock again.`,
+          'DUPLICATE_IMPORT',
+          { previous: earlier },
+        );
+    }
+    let stockRows = 0;
     for (const r of results) {
       if (r.status === 'error' || !r.data) {
         summary.errors++;
@@ -318,7 +432,7 @@ export async function importRows(
           description: `${actor.username} added new product ${d.sku} (${d.name}) via Excel import.`,
           newValue: d,
         });
-        if (d.quantity && d.quantity > 0)
+        if (d.quantity && d.quantity > 0) {
           await applyStockChange(t, actor, {
             productId: id,
             warehouseId,
@@ -329,6 +443,8 @@ export async function importRows(
             sourceType: 'IMPORT',
             unitCost: d.purchasePrice,
           });
+          stockRows++;
+        }
         summary.imported++;
         continue;
       }
@@ -375,22 +491,36 @@ export async function importRows(
         oldValue: Object.fromEntries(changed.map((k) => [k, before[k]])),
         newValue: Object.fromEntries(changed.map((k) => [k, (next as Record<string, unknown>)[k]])),
       });
-      if (d.quantity !== null && options.quantityMode === 'set') {
+      if (d.quantity !== null && quantityMode === 'set') {
         await adjustToCount(t, actor, { productId: id, warehouseId, countedQuantity: d.quantity, reason: 'Stock set by Excel import', reference });
-      } else if (d.quantity && d.quantity > 0 && options.quantityMode === 'add') {
+        stockRows++;
+      } else if (d.quantity && d.quantity > 0 && quantityMode === 'add') {
         await applyStockChange(t, actor, {
           productId: id,
           warehouseId,
           type: 'STOCK_IN',
           quantity: d.quantity,
           reference,
-          notes: 'Excel import',
+          notes: fileName ? `Excel import: ${fileName}` : 'Excel import',
           sourceType: 'IMPORT',
           unitCost: d.purchasePrice,
         });
+        stockRows++;
       }
       summary.updated++;
     }
+
+    await t.run(
+      `INSERT INTO product_imports (file_name, file_hash, quantity_mode, imported, updated, stock_rows, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      fileName ?? null,
+      options.fileHash ?? null,
+      withQuantity.length ? quantityMode : null,
+      summary.imported,
+      summary.updated,
+      stockRows,
+      actor.id,
+    );
 
     await audit(t, actor, {
       action: 'IMPORT.PRODUCTS',

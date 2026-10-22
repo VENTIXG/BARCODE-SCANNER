@@ -5,7 +5,7 @@ import { actorOf, requirePermission } from '../middleware/auth.js';
 import { badRequest } from '../lib/errors.js';
 import { FMT, PRODUCT_COLUMNS, STOCK_COLUMNS, addSheet, newWorkbook, sendWorkbook, toDate, type Column } from '../lib/excel.js';
 import { str } from '../lib/http.js';
-import { IMPORT_FIELDS, importRows, validateRows } from '../lib/importer.js';
+import { IMPORT_FIELDS, importRows, previousImports, validateRows } from '../lib/importer.js';
 import { PRODUCT_SELECT, buildProductWhere, orderBy, type ProductRow } from '../lib/products.js';
 import { TX_SELECT, buildTxWhere, readTxFilters } from '../lib/transactions.js';
 
@@ -18,11 +18,15 @@ const rowSchema = z
   .catchall(z.union([z.string(), z.number(), z.boolean(), z.null()]));
 const rowsSchema = z.array(rowSchema).min(1, 'The file has no data rows').max(20000, 'Maximum 20,000 rows per import');
 
+const fileHashSchema = z.string().regex(/^[a-f0-9]{64}$/).nullish();
 const optionsSchema = z.object({
-  duplicateStrategy: z.enum(['skip', 'update', 'ask']).default('skip'),
+  // Existing products are updated with the file's values; empty cells keep what is stored.
+  duplicateStrategy: z.enum(['skip', 'update', 'ask']).default('update'),
   decisions: z.record(z.string(), z.enum(['skip', 'update'])).optional(),
-  quantityMode: z.enum(['ignore', 'set', 'add']).default('ignore'),
+  // No default: quantities for existing products need a choice (see importRows).
+  quantityMode: z.enum(['ignore', 'set', 'add']).optional(),
   createMissing: z.boolean().default(true),
+  allowDuplicate: z.boolean().default(false),
 });
 
 function pickFields(rows: z.infer<typeof rowsSchema>) {
@@ -60,7 +64,7 @@ importRouter.get('/template', async (req, res) => {
         ['Category', 'No', 'Created automatically if it does not exist (option in the import screen).'],
         ['Supplier', 'No', 'Created automatically if it does not exist (option in the import screen).'],
         ['Unit', 'No', 'pcs, kg, lt, m, box ... Default: pcs.'],
-        ['Quantity', 'No', 'New products: initial stock (INITIAL_STOCK transaction). Existing products: see import options.'],
+        ['Quantity', 'No', 'New products: initial stock (INITIAL_STOCK transaction). Existing products: the import asks whether to add it to stock, set the stock to it, or leave the stock unchanged.'],
         ['Minimum Stock', 'No', 'Low stock alert threshold.'],
         ['Location', 'No', 'Format ZONE-RACK-SHELF, e.g. A-01-03. Created automatically.'],
         ['Purchase Price', 'No', 'Decimal comma or dot are both accepted.'],
@@ -70,8 +74,8 @@ importRouter.get('/template', async (req, res) => {
     : [
         ['A  SKU', 'Yes', 'Product code, or the product description. May contain spaces; it is kept exactly as written. Spacing and letter case do not create a second product.'],
         ['B  Barcode Number', 'No', 'EAN / UPC / Code128. Keep the column formatted as Text so leading zeros are kept.'],
-        ['C  Quantity', 'No', 'New products: initial stock. Existing products: see the import options (do not change / set / add).'],
-        ['D  Purchase Price', 'No', 'Decimal comma or dot are both accepted (12,50 or 12.50).'],
+        ['C  Quantity', 'No', 'New products: initial stock. Existing products: the import asks whether to add it to stock (delivery), set the stock to it (count), or leave the stock unchanged.'],
+        ['D  Purchase Price', 'No', 'Unit cost, not the line total. Decimal comma or dot are both accepted (12,50 or 12.50); an empty cell keeps the stored price.'],
         ['E  Selling Price', 'No', 'Empty = no selling price (nothing is invented); an existing selling price is kept.'],
         ['', '', 'New products get their name from column A. Files with the older, longer layout are accepted too.'],
       ];
@@ -81,22 +85,28 @@ importRouter.get('/template', async (req, res) => {
 
 importRouter.post('/products/validate', async (req, res) => {
   const rows = pickFields(rowsSchema.parse(req.body?.rows));
-  const results = await validateRows(getDb(), rows);
+  const fileHash = fileHashSchema.parse(req.body?.fileHash);
+  const db = getDb();
+  const results = await validateRows(db, rows);
   const summary = {
     total: results.length,
     new: results.filter((r) => r.status === 'new').length,
     existing: results.filter((r) => r.status === 'existing').length,
+    // Existing products with a quantity in the file: the import asks what the quantity means.
+    existingWithQuantity: results.filter((r) => r.status === 'existing' && r.data?.quantity != null).length,
     errors: results.filter((r) => r.status === 'error').length,
     warnings: results.filter((r) => r.warnings.length).length,
   };
-  res.json({ data: { summary, rows: results.map(({ data: _data, ...r }) => r) } });
+  const previous = await previousImports(db, fileHash);
+  res.json({ data: { summary, previousImports: previous, rows: results.map(({ data: _data, ...r }) => r) } });
 });
 
 importRouter.post('/products/commit', async (req, res) => {
   const rows = pickFields(rowsSchema.parse(req.body?.rows));
   const options = optionsSchema.parse(req.body?.options ?? {});
+  const fileHash = fileHashSchema.parse(req.body?.fileHash);
   const fileName = typeof req.body?.fileName === 'string' ? req.body.fileName.slice(0, 200) : undefined;
-  const summary = await importRows(getDb(), actorOf(req), rows, options, fileName);
+  const summary = await importRows(getDb(), actorOf(req), rows, { ...options, fileHash }, fileName);
   res.json({ data: summary });
 });
 

@@ -199,12 +199,15 @@ describe('Excel stock file: SKU | Barcode Number | Quantity | Purchase Price | S
     await page.getByRole('button', { name: 'Έλεγχος 2 γραμμών' }).waitFor();
     const mapped = await page.locator('tbody select').evaluateAll((els) => els.map((e) => e.value));
     assert.deepEqual(mapped, ['sku', 'barcode', 'quantity', 'purchasePrice', 'sellingPrice']);
-    await page.getByLabel('Στήλη ποσότητας για υπάρχοντα προϊόντα', { exact: false }).selectOption('add').catch(async () => {
-      await page.locator('select').filter({ has: page.locator('option[value=add]') }).selectOption('add');
-    });
-    await page.getByRole('radio', { name: 'Ενημέρωση υπάρχοντος', exact: true }).click();
+    // Existing products are updated by default.
+    assert.equal(await page.getByRole('radio', { name: 'Ενημέρωση υπάρχοντος', exact: true }).getAttribute('aria-checked'), 'true');
     await page.getByRole('button', { name: 'Έλεγχος 2 γραμμών' }).click();
-    await page.getByRole('button', { name: 'Εισαγωγή 2 έγκυρων γραμμών' }).click();
+    // cola-330 exists and has a quantity in the file: the quantity rule is asked before importing.
+    const importButton = page.getByRole('button', { name: 'Εισαγωγή 2 έγκυρων γραμμών' });
+    await importButton.waitFor();
+    assert.equal(await importButton.isDisabled(), true, 'the quantity rule must be chosen first');
+    await page.getByRole('radio', { name: /^Προσθήκη στο απόθεμα/ }).click();
+    await importButton.click();
     await page.getByText('Η εισαγωγή ολοκληρώθηκε').waitFor();
 
     const paper = (await api('GET', '/products?q=ΧΑΡΤΙ  A4 80G')).body.data[0];

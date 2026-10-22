@@ -6,10 +6,11 @@ import clsx from 'clsx';
 import { AlertTriangle, ArrowRight, CheckCircle2, Download, FileSpreadsheet, FileUp, RotateCcw, Upload, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api, download } from '../lib/api';
-import { fmtNumber, localDateToIso, todayLocal } from '../lib/format';
+import { fmtDateTime, fmtMoney, fmtNumber, fmtQty, localDateToIso, todayLocal } from '../lib/format';
 import { useT } from '../lib/i18n';
+import { sha256Hex } from '../lib/invoiceFile';
 import { errMsg } from '../lib/queries';
-import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorBox, Field, Input, PageHeader, Segmented, Select, Table, Tabs, Td, Th } from '../components/ui';
+import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, ErrorBox, Input, PageHeader, Segmented, Select, Table, Tabs, Td, Th } from '../components/ui';
 
 // ---- Column mapping -------------------------------------------------------------
 
@@ -39,13 +40,17 @@ const SYNONYMS: Record<FieldKey, string[]> = {
   category: ['category', 'group', 'product group', 'κατηγορια', 'ομαδα'],
   supplier: ['supplier', 'vendor', 'manufacturer', 'προμηθευτης'],
   unit: ['unit', 'uom', 'unit of measure', 'μοναδα', 'μμ', 'μοναδα μετρησης'],
-  quantity: ['quantity', 'qty', 'stock', 'on hand', 'current stock', 'ποσοτητα', 'αποθεμα', 'ποσ'],
+  quantity: ['quantity', 'qty', 'stock', 'on hand', 'current stock', 'pieces', 'pcs', 'units', 'ποσοτητα', 'αποθεμα', 'ποσ', 'τεμαχια', 'τεμ', 'τμχ', 'temaxia', 'posotita', 'posothta'],
   minStock: ['minimum stock', 'min stock', 'min', 'minimum', 'reorder level', 'reorder point', 'ελαχιστο', 'ελαχιστο αποθεμα'],
   location: ['location', 'bin', 'shelf', 'position', 'θεση', 'ραφι', 'θεση αποθηκης'],
-  purchasePrice: ['purchase price', 'cost', 'cost price', 'buy price', 'unit cost', 'τιμη αγορας', 'κοστος'],
-  sellingPrice: ['selling price', 'price', 'sale price', 'retail price', 'sell price', 'τιμη πωλησης', 'τιμη λιανικης', 'τιμη'],
+  purchasePrice: ['purchase price', 'cost', 'cost price', 'buy price', 'buying price', 'unit cost', 'τιμη αγορας', 'κοστος', 'τιμη κοστους', 'κοστος αγορας', 'timh agoras', 'timi agoras', 'kostos'],
+  sellingPrice: ['selling price', 'price', 'sale price', 'retail price', 'sell price', 'τιμη πωλησης', 'τιμη λιανικης', 'λιανικη', 'τιμη', 'timh polhshs', 'timi polisis', 'timh lianikhs'],
   status: ['status', 'active', 'state', 'κατασταση'],
 };
+
+/** Line totals, amounts, discounts and percentages: never a quantity or a unit price. */
+const NOT_A_UNIT_VALUE = /(^| )(total|totals|sum|amount|value|συνολο|συνολικη|συνολικο|συνολικης|αξια|ποσο|εκπτωση|εκπτ|discount|ποσοστο|percent)( |$)/;
+const VALUE_FIELDS = new Set<FieldKey>(['quantity', 'minStock', 'purchasePrice', 'sellingPrice']);
 
 const norm = (s: string) =>
   s
@@ -58,20 +63,24 @@ const norm = (s: string) =>
 function autoMap(headers: string[]): (FieldKey | '')[] {
   const result: (FieldKey | '')[] = headers.map(() => '');
   const used = new Set<FieldKey>();
-  // Pass 1: exact synonym matches; pass 2: header contains a synonym.
-  for (const pass of [0, 1]) {
+  // Pass 1: the title is a known name; pass 2: it contains one as whole words; pass 3: anywhere.
+  // In passes 2 and 3 the longest name wins: "Unit Price" is a price, not the unit, and
+  // "Minimum Stock Level" the minimum stock, not the quantity.
+  const fits = (n: string, s: string, pass: number) =>
+    pass === 0 ? n === s : pass === 1 ? ` ${n} `.includes(` ${s} `) : s.length > 2 && n.includes(s);
+  for (const pass of [0, 1, 2]) {
     headers.forEach((h, i) => {
       if (result[i]) return;
       const n = norm(h);
       if (!n) return;
+      let best: { key: FieldKey; length: number } | null = null;
       for (const f of FIELDS) {
-        if (used.has(f.key)) continue;
-        const hit = SYNONYMS[f.key].some((s) => (pass === 0 ? n === s : n.includes(s) && s.length > 2));
-        if (hit) {
-          result[i] = f.key;
-          used.add(f.key);
-          break;
-        }
+        if (used.has(f.key) || (VALUE_FIELDS.has(f.key) && NOT_A_UNIT_VALUE.test(n))) continue;
+        for (const s of SYNONYMS[f.key]) if (fits(n, s, pass) && (!best || s.length > best.length)) best = { key: f.key, length: s.length };
+      }
+      if (best) {
+        result[i] = best.key;
+        used.add(best.key);
       }
     });
   }
@@ -125,11 +134,26 @@ interface RowResult {
   status: 'new' | 'existing' | 'error';
   errors: string[];
   warnings: string[];
-  match?: { id: number; sku: string; name: string; matchedBy: 'sku' | 'barcode' | 'name' };
+  match?: {
+    id: number;
+    sku: string;
+    name: string;
+    matchedBy: 'sku' | 'barcode' | 'name';
+    current?: { quantity: number; purchasePrice: number; sellingPrice: number | null };
+  };
+}
+
+interface PreviousImport {
+  fileName: string | null;
+  quantityMode: QuantityMode | null;
+  stockRows: number;
+  username: string | null;
+  createdAt: string;
 }
 
 interface ValidateResponse {
-  summary: { total: number; new: number; existing: number; errors: number; warnings: number };
+  summary: { total: number; new: number; existing: number; existingWithQuantity: number; errors: number; warnings: number };
+  previousImports: PreviousImport[];
   rows: RowResult[];
 }
 
@@ -145,6 +169,8 @@ interface ImportSummary {
 }
 
 type Strategy = 'skip' | 'update' | 'ask';
+/** The Quantity column for products that already exist. */
+type QuantityMode = 'add' | 'set' | 'ignore';
 
 export default function ImportExport() {
   const t = useT();
@@ -194,8 +220,12 @@ function ImportWizard() {
   const [mapping, setMapping] = useState<(FieldKey | '')[]>([]);
   const [parseError, setParseError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [strategy, setStrategy] = useState<Strategy>('skip');
-  const [quantityMode, setQuantityMode] = useState<'ignore' | 'set' | 'add'>('ignore');
+  // Existing products get the file's values (empty cells keep what is stored).
+  const [strategy, setStrategy] = useState<Strategy>('update');
+  // No default: what the quantity of an existing product means is asked, never assumed.
+  const [quantityMode, setQuantityMode] = useState<QuantityMode | null>(null);
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
+  const [fileHash, setFileHash] = useState<string | null>(null);
   const [createMissing, setCreateMissing] = useState(true);
   const [decisions, setDecisions] = useState<Record<string, 'skip' | 'update'>>({});
   const [filter, setFilter] = useState<'all' | 'new' | 'existing' | 'error'>('all');
@@ -208,6 +238,9 @@ function ImportWizard() {
     setValidation(null);
     setResult(null);
     setDecisions({});
+    setQuantityMode(null);
+    setAllowDuplicate(false);
+    setFileHash(null);
     setParseError(null);
     workbook.current = null;
   };
@@ -225,6 +258,8 @@ function ImportWizard() {
       workbook.current = wb;
       const p = parseSheet(wb, file.name, wb.SheetNames[0]);
       if (!p.rows.length) throw new Error(t('The file has no data rows'));
+      // Recognises the same file later, so its quantities are not added to stock twice unnoticed.
+      setFileHash(await sha256Hex(new Uint8Array(buf)));
       setParsed(p);
       setMapping(mappingFor(p));
       setStep(1);
@@ -258,7 +293,7 @@ function ImportWizard() {
   const missingRequired = FIELDS.filter((f) => f.key === 'sku' && !mappedFields.has(f.key));
 
   const validate = useMutation({
-    mutationFn: () => api.post<{ data: ValidateResponse }>('/import/products/validate', { rows: apiRows }).then((r) => r.data),
+    mutationFn: () => api.post<{ data: ValidateResponse }>('/import/products/validate', { rows: apiRows, fileHash }).then((r) => r.data),
     onSuccess: (v) => {
       setValidation(v);
       setFilter(v.summary.errors ? 'error' : 'all');
@@ -272,7 +307,8 @@ function ImportWizard() {
         .post<{ data: ImportSummary }>('/import/products/commit', {
           rows: apiRows,
           fileName: parsed?.fileName,
-          options: { duplicateStrategy: strategy, decisions, quantityMode, createMissing },
+          fileHash,
+          options: { duplicateStrategy: strategy, decisions, quantityMode: needsQuantityChoice ? quantityMode : undefined, createMissing, allowDuplicate },
         })
         .then((r) => r.data),
     onSuccess: (r) => {
@@ -284,6 +320,18 @@ function ImportWizard() {
 
   const rowsByNumber = useMemo(() => new Map(apiRows.map((r) => [r.rowNumber as number, r])), [apiRows]);
   const toImport = validation ? validation.summary.new + (strategy === 'update' ? validation.summary.existing : strategy === 'ask' ? Object.values(decisions).filter((d) => d === 'update').length : 0) : 0;
+  // Existing products that get a quantity from the file: the person says what the quantity means.
+  const updates = (r: RowResult) => r.status === 'existing' && (strategy === 'update' || (strategy === 'ask' && decisions[String(r.rowNumber)] === 'update'));
+  const hasQuantity = (r: RowResult) => {
+    const q = rowsByNumber.get(r.rowNumber)?.quantity;
+    return q != null && String(q).trim() !== '';
+  };
+  const quantityRows = validation ? validation.rows.filter((r) => updates(r) && hasQuantity(r)).length : 0;
+  const needsQuantityChoice = quantityRows > 0;
+  const stockedBefore = validation?.previousImports.filter((p) => p.stockRows > 0) ?? [];
+  const duplicateBlocked = needsQuantityChoice && quantityMode === 'add' && stockedBefore.length > 0 && !allowDuplicate;
+  const commitBlocker =
+    toImport === 0 ? null : needsQuantityChoice && !quantityMode ? t('Choose what the quantities of existing products mean') : duplicateBlocked ? t('Confirm adding this file to stock again') : null;
 
   return (
     <div>
@@ -380,26 +428,22 @@ function ImportWizard() {
               ))}
             </tbody>
           </Table>
-          <div className="grid gap-4 border-t border-line p-4 md:grid-cols-3">
-            <Field label={t('If the SKU or barcode already exists')}>
+          <div className="grid gap-4 border-t border-line p-4 md:grid-cols-2">
+            {/* Not a <label>: a label would name (and click) the first button of the group. */}
+            <div role="group" aria-labelledby="strategy-label">
+              <span id="strategy-label" className="mb-1.5 block text-xs font-medium text-fg-2">{t('If the SKU or barcode already exists')}</span>
               <Segmented<Strategy>
                 value={strategy}
                 onChange={setStrategy}
                 className="flex w-full"
                 options={[
-                  { value: 'skip', label: t('Skip') },
                   { value: 'update', label: t('Update existing') },
+                  { value: 'skip', label: t('Skip') },
                   { value: 'ask', label: t('Ask me') },
                 ]}
               />
-            </Field>
-            <Field label={t('Quantity column for existing products')} hint={t('Every stock change is recorded as a transaction')}>
-              <Select value={quantityMode} onChange={(e) => setQuantityMode(e.target.value as 'ignore')}>
-                <option value="ignore">{t("Don't change stock")}</option>
-                <option value="set">{t('Set as current stock (adjustment)')}</option>
-                <option value="add">{t('Add to stock (Stock IN)')}</option>
-              </Select>
-            </Field>
+              <span className="mt-1 block text-xs text-muted">{t('Update: the file’s quantity, prices and other values are saved; empty cells keep what is stored.')}</span>
+            </div>
             <div className="pt-6">
               <Checkbox checked={createMissing} onChange={setCreateMissing} label={t('Create missing categories and suppliers')} />
             </div>
@@ -432,6 +476,27 @@ function ImportWizard() {
               </div>
             ))}
           </div>
+          {validation.previousImports.length > 0 && (
+            <div className="mx-4 mt-4 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn-soft p-3 text-sm">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warn" />
+              <div>
+                <p className="font-medium">
+                  {t('This file was already imported on {date}{by}.', {
+                    date: fmtDateTime(validation.previousImports[0].createdAt),
+                    by: validation.previousImports[0].username ? ` (${validation.previousImports[0].username})` : '',
+                  })}
+                </p>
+                {needsQuantityChoice && quantityMode === 'add' && stockedBefore.length > 0 && (
+                  <div className="mt-2">
+                    <Checkbox checked={allowDuplicate} onChange={setAllowDuplicate} label={t('Add its quantities to stock again')} />
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {needsQuantityChoice && (
+            <QuantityChoice rows={quantityRows} value={quantityMode} onChange={setQuantityMode} />
+          )}
           <div className="flex flex-wrap items-center justify-between gap-2 px-4 pt-3">
             <Segmented
               value={filter}
@@ -457,6 +522,7 @@ function ImportWizard() {
             data={rowsByNumber}
             strategy={strategy}
             decisions={decisions}
+            quantityMode={quantityMode}
             onDecision={(n, d) => setDecisions((s) => ({ ...s, [String(n)]: d }))}
           />
           <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line p-4">
@@ -467,8 +533,9 @@ function ImportWizard() {
                   <AlertTriangle className="size-4" /> {t('{n} rows with errors will be skipped', { n: validation.summary.errors })}
                 </span>
               )}
+              {commitBlocker && <span className="text-sm text-warn">{commitBlocker}</span>}
               {commit.error && <span className="text-sm text-bad">{errMsg(commit.error)}</span>}
-              <Button variant="primary" disabled={toImport === 0} loading={commit.isPending} onClick={() => commit.mutate()}>
+              <Button variant="primary" disabled={toImport === 0 || !!commitBlocker} loading={commit.isPending} onClick={() => commit.mutate()}>
                 {t('Import {n} valid rows', { n: fmtNumber(toImport) })}
               </Button>
             </div>
@@ -524,23 +591,73 @@ function ImportWizard() {
   );
 }
 
+/** What the Quantity column means for products that already exist; asked, never assumed. */
+function QuantityChoice({ rows, value, onChange }: { rows: number; value: QuantityMode | null; onChange: (v: QuantityMode) => void }) {
+  const t = useT();
+  const options: { value: QuantityMode; label: string; hint: string }[] = [
+    { value: 'add', label: t('Add to stock'), hint: t('A delivery: the quantity is added to the current stock (10 + 5 = 15).') },
+    { value: 'set', label: t('Set the stock'), hint: t('A stock count: the stock becomes the quantity in the file (10 → 5).') },
+    { value: 'ignore', label: t('Leave the stock'), hint: t('Only prices and the other values are updated.') },
+  ];
+  return (
+    <div className={clsx('mx-4 mt-4 rounded-lg border p-3', value ? 'border-line' : 'border-warn/50 bg-warn-soft/40')}>
+      <p className="text-sm font-medium">{t('{n} existing products have a quantity in the file. What does it mean?', { n: fmtNumber(rows) })}</p>
+      <div className="mt-2 grid gap-2 sm:grid-cols-3" role="radiogroup" aria-label={t('Quantity of existing products')}>
+        {options.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            role="radio"
+            aria-checked={value === o.value}
+            onClick={() => onChange(o.value)}
+            className={clsx(
+              'rounded-lg border p-3 text-left transition-colors',
+              value === o.value ? 'border-brand bg-brand-soft' : 'border-line bg-surface hover:border-line-strong',
+            )}
+          >
+            <span className="block text-sm font-semibold">{o.label}</span>
+            <span className="mt-0.5 block text-xs text-muted">{o.hint}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PreviewTable({
   rows,
   data,
   strategy,
   decisions,
+  quantityMode,
   onDecision,
 }: {
   rows: RowResult[];
   data: Map<number, Record<string, unknown>>;
   strategy: Strategy;
   decisions: Record<string, 'skip' | 'update'>;
+  quantityMode: QuantityMode | null;
   onDecision: (row: number, d: 'skip' | 'update') => void;
 }) {
   const t = useT();
   const LIMIT = 500;
   if (!rows.length) return <EmptyState title={t('No rows in this view')} />;
   const cell = (v: unknown) => (v == null || v === '' ? <span className="text-muted">—</span> : String(v));
+  const empty = (v: unknown) => v == null || String(v).trim() === '';
+  const updates = (r: RowResult) => r.status === 'existing' && (strategy === 'update' || (strategy === 'ask' && decisions[String(r.rowNumber)] === 'update'));
+  /** Under the file's value: what is stored now and what it becomes. */
+  const stockNote = (r: RowResult, q: unknown) => {
+    const cur = r.match?.current;
+    if (!cur || !updates(r)) return null;
+    const n = Number(String(q ?? '').replace(',', '.'));
+    if (empty(q) || quantityMode === 'ignore' || !quantityMode || Number.isNaN(n)) return t('stock {n}', { n: fmtQty(cur.quantity) });
+    return `${fmtQty(cur.quantity)} → ${fmtQty(quantityMode === 'add' ? cur.quantity + n : n)}`;
+  };
+  const priceNote = (r: RowResult, v: unknown, now: number | null | undefined) => {
+    if (!r.match?.current || !updates(r)) return null;
+    return empty(v) ? t('keeps {p}', { p: fmtMoney(now) }) : t('now {p}', { p: fmtMoney(now) });
+  };
+  const note = (s: string | null) => s && <div className="text-[11px] whitespace-nowrap text-muted">{s}</div>;
   return (
     <div className="max-h-[60vh] overflow-auto">
       <Table>
@@ -552,6 +669,8 @@ function PreviewTable({
             <Th>{t('Barcode')}</Th>
             <Th>{t('Product Name')}</Th>
             <Th align="right">{t('Quantity')}</Th>
+            <Th align="right">{t('Purchase Price')}</Th>
+            <Th align="right">{t('Selling Price')}</Th>
             <Th>{t('Messages')}</Th>
           </tr>
         </thead>
@@ -577,10 +696,12 @@ function PreviewTable({
                 <Td className="whitespace-pre font-mono text-xs">{cell(d.sku)}</Td>
                 <Td className="whitespace-pre font-mono text-xs">{cell(d.barcode)}</Td>
                 <Td className="max-w-[240px] truncate">{cell(d.name ?? r.match?.name)}</Td>
-                <Td align="right" className="tabular">{cell(d.quantity)}</Td>
+                <Td align="right" className="tabular">{cell(d.quantity)}{note(stockNote(r, d.quantity))}</Td>
+                <Td align="right" className="tabular">{cell(d.purchasePrice)}{note(priceNote(r, d.purchasePrice, r.match?.current?.purchasePrice))}</Td>
+                <Td align="right" className="tabular">{cell(d.sellingPrice)}{note(priceNote(r, d.sellingPrice, r.match?.current?.sellingPrice))}</Td>
                 <Td className="text-xs">
-                  {r.errors.map((e) => <div key={e} className="text-bad">{e}</div>)}
-                  {r.warnings.map((w) => <div key={w} className="text-warn">{w}</div>)}
+                  {r.errors.map((e) => <div key={e} className="text-bad">{t(e)}</div>)}
+                  {r.warnings.map((w) => <div key={w} className="text-warn">{t(w)}</div>)}
                   {r.match && (
                     <div className="text-muted">
                       {t('Existing')}: <Link to={`/products/${r.match.id}`} className="whitespace-pre underline">{r.match.sku}</Link>
